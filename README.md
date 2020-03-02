@@ -5,8 +5,8 @@
 ### Download dependent repositories
 
 '''sh
-git clone https://github.com/omni-us/pytorch-cnn-visualizations.git
-mv pytorch-cnn-visualizations pytorch_cnn_visualisations
-git clone https://github.com/ronghuaiyang/arcface-pytorch.git
-mv arcface-pytorch arcface_pytorch
+pip install dl-cliche
+pip install albumentations
+git clone https://github.com/daisukelab/pytorch_cnn_visualizations
+git clone https://github.com/daisukelab/arcface_pytorch.git
 '''

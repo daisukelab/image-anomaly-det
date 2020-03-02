@@ -3,12 +3,13 @@ from torch import nn
 import numpy as np
 from dlcliche.image import show_2D_tSNE
 import sys
-from pytorch_cnn_visualisations.src.gradcam import GradCam
+from pytorch_cnn_visualizations.src.gradcam import GradCam
 from skimage.transform import resize
 import matplotlib.pyplot as plt
+from .options import Options
 
 
-def get_head_model(model):
+def get_body_model(model):
     metric_model = nn.Sequential(*list(model.children())[:-1])
     return metric_model
 
@@ -59,11 +60,12 @@ def show_heatmap(img, hm, label, alpha=0.5, ax=None, show_original=None):
     ax.axis('off')
 
 
-def visualize_cnn_grad_cam(model, sample_img, title, target_class=1, target_layer=7,
-                           ax=None, show_original=None):
-    grad_cam = GradCam(model, target_layer=target_layer)
+def visualize_cnn_grad_cam(model, image, title, target_class=1, target_layer=7, counterfactual=False,
+                           ax=None, show_original=None, separate_head=None, device=None):
+    grad_cam = GradCam(model, target_layer=target_layer,
+                       separate_head=separate_head, device=device)
     # Generate cam mask
-    cam = grad_cam.generate_cam(sample_img, target_class)
+    cam = grad_cam.generate_cam(image, target_class, counterfactual=counterfactual)
     #plt.imshow((np_img + cam[..., np.newaxis]) / 2)
-    show_heatmap(sample_img, cam, title, ax=ax, show_original=show_original)
+    show_heatmap(image, cam, title, ax=ax, show_original=show_original)
    
