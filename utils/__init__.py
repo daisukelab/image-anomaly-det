@@ -14,6 +14,11 @@ def get_body_model(model):
     return metric_model
 
 
+def set_model_param_trainable(model, flag):
+    for param in model.parameters():
+        param.requires_grad = flag
+
+
 def get_embeddings(embedding_model, data_loader, device, return_y=False):
     """Calculate embeddings for all samples in a data_loader.
     

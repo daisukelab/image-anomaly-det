@@ -31,7 +31,7 @@ class AnoTwinAD:
 
     def __init__(self, project_name, work_folder, valid_pct=0.2, suffix='.png', n_mosts=4,
                  resize=384, size=384, batch_size=16, workers=8,
-                 model='arc_face', backbone='resnet34',
+                 model='arc_face', backbone='resnet34', pre_crop_rect=None,
                  train_album_tfm=None, train_tfm=None, anomaly_color=False,
                  dataset_cls=DefectOnBlobDataset, val_ds_cls=AsIsDataset, logger=None):
         """Prepare for ATAD data handling.
@@ -50,7 +50,7 @@ class AnoTwinAD:
         self.project, self.work = project_name, work_folder
         self.valid_pct, self.suffix, self.n_mosts = valid_pct, suffix, n_mosts
         self.resize, self.size, self.batch_size, self.workers = resize, size, batch_size, workers
-        self.model, self.backbone = model, backbone
+        self.model, self.backbone, self.pre_crop_rect = model, backbone, pre_crop_rect
         self.train_album_tfm, self.train_tfm = train_album_tfm, train_tfm
         self.anomaly_color, self.dataset_cls, self.val_ds_cls = anomaly_color, dataset_cls, val_ds_cls
         self.root = Path(self.work)/self.project
@@ -121,7 +121,7 @@ class AnoTwinAD:
                                        load_size=self.resize, crop_size=self.size,
                                        album_tfm=self.train_album_tfm if x == 'train' else None,
                                        transform=self.train_tfm if x == 'train' else None,
-                                       color=self.anomaly_color)
+                                       pre_crop_rect=self.pre_crop_rect, color=self.anomaly_color)
                    for x in ['train', 'val']}
         self.dl = {x: data.DataLoader(self.ds[x], batch_size=self.batch_size,
                                       shuffle=True, num_workers=self.workers)
@@ -132,7 +132,7 @@ class AnoTwinAD:
         self.ds['ref'] = self.val_ds_cls(self.good, files=files,
                                      class_labels=['good'] * len(files),
                                      load_size=self.resize, crop_size=self.size,
-                                     album_tfm=None, transform=None)
+                                     album_tfm=None, transform=None, pre_crop_rect=self.pre_crop_rect)
         self.dl['ref'] = data.DataLoader(self.ds['ref'], batch_size=self.batch_size,
                                          shuffle=False, num_workers=self.workers)
 
@@ -141,7 +141,7 @@ class AnoTwinAD:
         self.ds['test'] = self.val_ds_cls(self.test, files=self.test_df.file.values,
                                       class_labels=self.test_df.label.values,
                                       load_size=self.resize, crop_size=self.size,
-                                      album_tfm=None, transform=None)
+                                      album_tfm=None, transform=None, pre_crop_rect=self.pre_crop_rect)
         self.dl['test'] = data.DataLoader(self.ds['test'], batch_size=self.batch_size,
                                           shuffle=False, num_workers=self.workers)
 
@@ -230,7 +230,8 @@ class AnoTwinAD:
                     visualize_cnn_grad_cam(self.model,
                                            image=(self.ds['test'].load_image(self.test/f'{cur.file}',
                                                                   as_transformed=True)).unsqueeze(0),
-                                           title=f'test/{cur.file}\nhas distance={cur.distance:.6f}',
+                                           title=(f'test/{cur.file}\nhas distance={cur.distance:.6f}'
+                                                  if j == 0 else ''),
                                            target_class=j, target_layer=7,
                                            counterfactual=(j == 0),
                                            show_original=('vertical' if j == 0 else None),
@@ -250,6 +251,7 @@ class AnoTwinAD:
         y_true = np.array(list(map(int, test_anomaly_mask)))
         preds = np.min(distances, axis=1)
         self.ds['test'].df['distance'] = preds
+        self.test_df['distance'] = preds
         #display(self.ds['test'].df)
 
         # Get worst/best info
@@ -261,7 +263,7 @@ class AnoTwinAD:
                                                      distances, self.ds['ref'], self.ds['test'])
 
         # 2. ROC/AUC
-        fpr, tpr, thresholds = metrics.roc_curve(y_true, preds)
+        fpr, tpr, self.thresholds = metrics.roc_curve(y_true, preds)
         auc = metrics.auc(fpr, tpr)
 
         # 3. Get mean_class_distance
@@ -330,6 +332,32 @@ class AnoTwinAD:
             img = np.abs(img2 - img1)
             ax.imshow(img)
             ax.set_title(f'{cur}: {np_describe(img)}')
+
+    def close_up_test_sample(self, img, label, ax=None, figsize=(15, 8)):
+        img = img.unsqueeze(0)
+        np_img = to_np_img(img)
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=figsize)
+        visualize_cnn_grad_cam(self.model.cpu(), img, label, target_class=0, target_layer=7,
+                               counterfactual=True, show_original='horizontal',
+                               ax=ax, separate_head=self.metric_fc.cpu())
+
+    def close_up_test(self, phase='test', start=None, end=None, ax=None, figsize=(15, 8)):
+        count = 0
+        for xs, ys in self.dl[phase]:
+            for x, y in zip(xs, ys):
+                count += 1
+                if start and (count-1) < start:
+                    continue
+
+                if phase != 'test':
+                    y = self.ds['test'].classes.index('good') # force label as 'good'
+                label = self.ds['test'].classes[y] # class has to belong to test dataset
+                disp_label = f'{phase}[{count - 1}] as class: {label}'
+                close_up_test_sample(self, x, disp_label, ax=ax, figsize=figsize)
+
+                if end and end < count:
+                    break
 
     def __repr__(self):
         def tabbed(text): return text.replace('\n', '\n    ')
