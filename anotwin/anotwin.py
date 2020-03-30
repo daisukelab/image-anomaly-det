@@ -1,4 +1,4 @@
-
+import sys
 import numpy as np
 import pandas as pd
 import torch
@@ -7,16 +7,21 @@ from torch.utils import data
 from torchvision import transforms, models
 from pathlib import Path
 import matplotlib.pyplot as plt
-from dlcliche.utils import ensure_delete, ensure_folder, get_logger, copy_with_prefix
+from dlcliche.utils import (ensure_delete, ensure_folder, get_logger,
+                            copy_with_prefix, copy_any, deterministic_everything)
 from dlcliche.image import show_np_image, subplot_matrix
 from dlcliche.math import n_by_m_distances, np_describe
 from sklearn import metrics
 
 from utils import (get_embeddings, get_body_model,
                    visualize_cnn_grad_cam, visualize_embeddings,
-                   to_np_img)
-from atwin.dataset import AnomalyTwinDataset, DefectOnBlobDataset, AsIsDataset
+                   to_norm_image)
+from anotwin.dataset import AnomalyTwinDataset, DefectOnBlobDataset, AsIsDataset
 from arcface_pytorch.models import ArcMarginProduct
+
+sys.path.append('..')
+from base_ano_det import BaseAnoDet
+from .train import train_model
 
 
 _backbone_models = {
@@ -26,39 +31,67 @@ _backbone_models = {
     'resnet101': models.resnet101,
 }
 
-class AnoTwinAD:
-    """Anomaly Twin Anomaly Detector."""
 
-    def __init__(self, project_name, work_folder, valid_pct=0.2, suffix='.png', n_mosts=4,
-                 resize=384, size=384, batch_size=16, workers=8,
-                 model='arc_face', backbone='resnet34', pre_crop_rect=None,
-                 train_album_tfm=None, train_tfm=None, anomaly_color=False,
-                 dataset_cls=DefectOnBlobDataset, val_ds_cls=AsIsDataset, logger=None):
-        """Prepare for ATAD data handling.
+def set_trainable(model, flag):
+    for param in model.parameters():
+        param.requires_grad = flag
 
-        Working folders will be created as:
-        - `work_folder/project_name/good`: storing _good_ samples for training & runtime reference.
-        - `work_folder/project_name/test`: storing test samples for evaluation purpose only.
-        - `work_folder/project_name/runtime`: TBD, runtime reference samples might be moved here.
-        - `work_folder/project_name/weights`: saved model weights will be stored here.
+
+class AnoTwinDet(BaseAnoDet):
+    """Anomaly Twin Detector.
+
+    Working folders will be created as:
+    - `work_folder/project_name/good`: storing _good_ samples for training & runtime reference.
+    - `work_folder/project_name/test`: storing test samples for evaluation purpose only.
+    - `work_folder/project_name/runtime`: TBD, runtime reference samples might be moved here.
+    - `work_folder/project_name/weights`: saved model weights will be stored here.
         
-        Args:
-            dataset_cls:
-                Any of AnomalyTwinImageList, DefectOnTheEdgeImageList,
-                DefectOnBlobImageList.
-        """
-        self.project, self.work = project_name, work_folder
-        self.valid_pct, self.suffix, self.n_mosts = valid_pct, suffix, n_mosts
-        self.resize, self.size, self.batch_size, self.workers = resize, size, batch_size, workers
-        self.model, self.backbone, self.pre_crop_rect = model, backbone, pre_crop_rect
-        self.train_album_tfm, self.train_tfm = train_album_tfm, train_tfm
-        self.anomaly_color, self.dataset_cls, self.val_ds_cls = anomaly_color, dataset_cls, val_ds_cls
+    Args:
+        dataset_cls:
+            Any of AnomalyTwinImageList, DefectOnTheEdgeImageList,
+            DefectOnBlobImageList.
+    """
+
+    def __init__(self, params, **kwargs):
+        super().__init__(params=params)
+        self.project, self.work = params.project, params.work_folder
+        self.valid_pct, self.suffix, self.n_mosts = params.valid_pct, params.suffix, params.n_mosts
+        self.load_size, self.crop_size = params.load_size, params.crop_size
+        self.batch_size, self.workers = params.batch_size, params.workers
+        self.model, self.backbone = params.model, params.backbone
+        self.train_album_tfm, self.train_tfm = params.train_album_tfm, params.train_tfm
+        self.dataset_cls, self.val_ds_cls = params.dataset_cls, params.val_ds_cls
+
         self.root = Path(self.work)/self.project
-        self.good, self.test = self.root/'good',  self.root/'test'
+        self.good, self.test = self.root/'good', self.root/'test'
         self.runtime, self.weights = self.root/'runtime', self.root/'weights'
         self.reset_work(delete=False)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.logger = get_logger() if logger is None else logger
+        self.logger = get_logger() if params.logger is None else params.logger
+
+    def setup_train(self, train_samples, model_weights=None, reset=True):
+        if reset:
+            self.reset_work(delete=True)
+            assert len(list(self.test.glob('*'))) == 0, f'{self.test} still have files...'
+        self.add_good_samples(train_samples)
+        self.create_model(model_weights)
+        self.create_datasets()
+
+        # random seed
+        base_seed = self.params.seed if 'seed' in self.params else 0
+        base_seed += self.experiment_no
+        deterministic_everything(base_seed, pytorch=True)
+        self.ds['train'].set_rand_base_seed(base_seed)
+        self.ds['val'].set_rand_base_seed(base_seed)
+
+    def setup_runtime(self, model_weights):
+        self.create_model(model_weights)
+        self.model.eval()
+        # create reference
+        self.create_datasets()
+        self.create_ref_dataset()
+        self.ref_embs = get_embeddings(self.model, self.dl['ref'], self.device)
+        self.logger.info('Calculated reference embeddings.')
 
     def get_backbone(self):
         if type(self.backbone) == str and self.backbone in _backbone_models:
@@ -82,9 +115,13 @@ class AnoTwinAD:
     def list_good_samples(self):
         return sorted(self.good.glob(f'*{self.suffix}'))
     
-    def reset_work(self, delete=True):
-        if delete:
-            ensure_delete(self.root)
+    def reset_work(self, delete=True, delete_all=False):
+        if delete or delete_all:
+            ensure_delete(self.good)
+            ensure_delete(self.test)
+            ensure_delete(self.runtime)
+        if delete_all:
+            ensure_delete(self.weights)
         ensure_folder(self.root)
         ensure_folder(self.good)
         ensure_folder(self.test)
@@ -94,7 +131,7 @@ class AnoTwinAD:
     def reset_test(self):
         self.test_df = None
 
-    def set_test_samples(self, label, files, prefix='', symlinks=False):
+    def set_test_samples(self, files, label='good', prefix='', symlinks=False):
         if 'test_df' not in self.__dict__:
             self.test_df = pd.DataFrame({'file': [], 'label': []})
         # copy to test folder.
@@ -103,14 +140,13 @@ class AnoTwinAD:
             # check files are firmly existing.
             if not f.is_file():
                 raise Exception(f'Test sample "{f}" doesn\'t exist.')
-        test_prefix = f'{prefix}{str(label)}_'
-        copy_with_prefix(files, self.test, test_prefix, symlinks=symlinks)
-        # add to test data frame.
-        self.test_df = pd.concat([
-            self.test_df,
-            pd.DataFrame({'file': [self.test/(test_prefix+f.name) for f in files],
-                          'label': [label] * len(files)}),
-        ])
+            new_file_name = self.test/f'{prefix}{f.parent.name}-{f.name}'
+            copy_any(f, new_file_name, symlinks=symlinks)
+            # add to test data frame.
+            self.test_df = pd.concat([
+                self.test_df,
+                pd.DataFrame({'file': [new_file_name], 'label': [label]}),
+            ])
 
     def create_datasets(self):
         all_train_files = self.list_good_samples()
@@ -118,10 +154,15 @@ class AnoTwinAD:
         file_lists = {x: all_train_files[:n_train] if x is 'train' else all_train_files[n_train:]
                          for x in ['train', 'val']}
         self.ds = {x: self.dataset_cls(self.good, file_lists[x],
-                                       load_size=self.resize, crop_size=self.size,
+                                       load_size=self.load_size, crop_size=self.crop_size,
                                        album_tfm=self.train_album_tfm if x == 'train' else None,
                                        transform=self.train_tfm if x == 'train' else None,
-                                       pre_crop_rect=self.pre_crop_rect, color=self.anomaly_color)
+                                       width_min=self.params.data.width_min,
+                                       width_max=self.params.data.width_max,
+                                       length_max=self.params.data.length_max,
+                                       color=self.params.data.color,
+                                       pre_crop_rect=self.params.data.pre_crop_rect,
+                                      )
                    for x in ['train', 'val']}
         self.dl = {x: data.DataLoader(self.ds[x], batch_size=self.batch_size,
                                       shuffle=True, num_workers=self.workers)
@@ -130,18 +171,20 @@ class AnoTwinAD:
     def create_ref_dataset(self):
         files = self.list_good_samples()
         self.ds['ref'] = self.val_ds_cls(self.good, files=files,
-                                     class_labels=['good'] * len(files),
-                                     load_size=self.resize, crop_size=self.size,
-                                     album_tfm=None, transform=None, pre_crop_rect=self.pre_crop_rect)
+                                         class_labels=['good'] * len(files),
+                                         load_size=self.load_size, crop_size=self.crop_size,
+                                         album_tfm=None, transform=None,
+                                         pre_crop_rect=self.params.data.pre_crop_rect)
         self.dl['ref'] = data.DataLoader(self.ds['ref'], batch_size=self.batch_size,
                                          shuffle=False, num_workers=self.workers)
 
 
     def create_test_dataset(self):
         self.ds['test'] = self.val_ds_cls(self.test, files=self.test_df.file.values,
-                                      class_labels=self.test_df.label.values,
-                                      load_size=self.resize, crop_size=self.size,
-                                      album_tfm=None, transform=None, pre_crop_rect=self.pre_crop_rect)
+                                          class_labels=self.test_df.label.values,
+                                          load_size=self.load_size, crop_size=self.crop_size,
+                                          album_tfm=None, transform=None,
+                                          pre_crop_rect=self.params.data.pre_crop_rect)
         self.dl['test'] = data.DataLoader(self.ds['test'], batch_size=self.batch_size,
                                           shuffle=False, num_workers=self.workers)
 
@@ -206,18 +249,34 @@ class AnoTwinAD:
                                          lr=lr, weight_decay=weight_decay)
         return optimizer
 
-    def train_setup(self, model_weights=None):
-        self.create_model(model_weights)
-        self.create_datasets()
+    def train_model(self, train_samples):
+        set_trainable(self.model, False)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = self.optimizer(kind='sgd', lr=self.params.lr, weight_decay=0.9)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.params.lr_step, gamma=0.1)
+        result = train_model(self, criterion, optimizer, scheduler, self.dl,
+                                   num_epochs=10, device=self.device)
 
-    def runtime_setup(self, model_weights):
-        self.create_model(model_weights)
-        self.model.eval()
-        # create reference
-        self.create_datasets()
-        self.create_ref_dataset()
-        self.ref_embs = get_embeddings(self.model, self.dl['ref'], self.device)
-        self.logger.info('Calculated reference embeddings.')
+        set_trainable(self.model, True)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = self.optimizer(kind='adam', lr=self.params.lr/10, weight_decay=self.params.weight_decay)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.params.lr_step, gamma=0.1)
+        result = train_model(self, criterion, optimizer, scheduler, self.dl,
+                                   num_epochs=self.params.n_epochs, device=self.device)
+
+        self.save_model(f'weights_{self.test_target}', weights=result['best_weights'])
+
+    def predict(self, test_samples):
+        self.reset_test()
+        self.set_test_samples(test_samples)
+        self.create_test_dataset()
+        test_embs = get_embeddings(self.model, self.dl['test'], self.device, return_y=False)
+        distances = n_by_m_distances(test_embs, self.ref_embs)
+        return np.min(distances, axis=1)
+
+    def predict_test(self, test_samples):
+        self.setup_runtime(model_weights=f'weights_{self.test_target}')
+        return self.predict(test_samples)
 
     def show_test_matching_images(self, title, most_test_info):
         fig, all_axes = plt.subplots(3, self.n_mosts, figsize=(18, 12),
@@ -319,7 +378,7 @@ class AnoTwinAD:
         for i, ax in enumerate(subplot_matrix(rows=rows, columns=columns, figsize=figsize)):
             cur = start_index + i
             img, label = self.ds[phase][cur]
-            img = to_np_img(img)
+            img = to_norm_image(img)
             ax.imshow(img)
             ax.set_title(f'{cur}:{self.ds[phase].classes[label]}')
 
@@ -328,14 +387,14 @@ class AnoTwinAD:
             cur = start_index + i * 2
             img1, _ = self.ds[phase][cur]
             img2, _ = self.ds[phase][cur + 1]
-            img1, img2 = to_np_img(img1), to_np_img(img2)
+            img1, img2 = to_norm_image(img1), to_norm_image(img2)
             img = np.abs(img2 - img1)
             ax.imshow(img)
             ax.set_title(f'{cur}: {np_describe(img)}')
 
     def close_up_test_sample(self, img, label, ax=None, figsize=(15, 8)):
         img = img.unsqueeze(0)
-        np_img = to_np_img(img)
+        np_img = to_norm_image(img)
         if ax is None:
             fig, ax = plt.subplots(1, 1, figsize=figsize)
         visualize_cnn_grad_cam(self.model.cpu(), img, label, target_class=0, target_layer=7,

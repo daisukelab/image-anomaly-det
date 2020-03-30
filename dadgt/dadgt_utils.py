@@ -29,61 +29,9 @@ import pytorch_lightning as pl
 from itertools import product
 from sklearn import metrics
 
-
-def to_raw_image(img, denorm_tensor=True):
-    if type(img) == torch.Tensor:
-        # denormalize
-        img = img.detach().cpu().numpy().transpose(1, 2, 0)
-        if denorm_tensor:
-            img = (img * 0.5) + 0.5
-        img = (img * 255).astype(np.uint8)
-    return img
-
-
-def random_crop(opt, pil_img):
-    w, h = pil_img.size
-    if opt.random:
-        x = random.randint(0, np.maximum(0, w - opt.crop_size))
-        y = random.randint(0, np.maximum(0, h - opt.crop_size))
-    else:
-        x = (w - opt.crop_size) // 2
-        y = (h - opt.crop_size) // 2
-    return pil_img.crop((x, y, x+opt.crop_size, y+opt.crop_size))
-
-
-def translate_fill_mirror(img, dx, dy):
-    """Translate (shift) image and fill empty part with mirror of the image."""
-    w, h = img.size
-    four = Image.new(img.mode, (w * 2, h * 2))
-    # mirror along x axis
-    zy = 0 if dy >= 0 else h
-    zxs = [w, 0] if dx >= 0 else [0, w]
-    four.paste(img, (zxs[0], zy, zxs[0] + w, zy + h))
-    four.paste(img.transpose(Image.FLIP_LEFT_RIGHT), (zxs[1], zy, zxs[1] + w, zy + h))
-    # mirror along y axis
-    zys = [0, h] if dy >= 0 else [h, 0]
-    (four.paste(four.crop((0, zys[0], w * 2, zys[0] + h))
-                .transpose(Image.FLIP_TOP_BOTTOM), (0, zys[1], w * 2,  zys[1] + h)))
-    # crop translated copy
-    zx, zy = int(dx * w), int(dy * h)
-    zx, zy = -zx if dx < 0 else w - zx, h + zy if dy < 0 else zy
-    return four.crop((zx, zy, zx + w, zy + h))
-
-
-def visualize_images(imgs, titles=None, col_max=5, axis=True):
-    n_row = (len(imgs) + col_max - 1) // col_max
-    fig = plt.figure(figsize=(15, 3 * n_row))
-    for row in range(n_row):
-        for col in range(5):
-            i = row * col_max + col
-            if i >= len(imgs): break
-
-            plt.subplot(n_row, col_max, i+1)
-            plt.imshow(to_raw_image(imgs[i].cpu().detach()))
-            if titles is not None:
-                plt.title(titles[i])
-            if not axis:
-                plt.axis('off')
+sys.path.append('..')
+from base_ano_det import BaseAnoDet
+from utils import *
 
 
 def create_model(device, n_class, weight_file=None, base_model=models.resnet18):
@@ -91,7 +39,10 @@ def create_model(device, n_class, weight_file=None, base_model=models.resnet18):
     model.fc = nn.Linear(model.fc.in_features, n_class)
     model = model.to(device)
     if weight_file is not None:
-        model.load_state_dict(torch.load(weight_file))
+        w = torch.load(weight_file)
+        if 'state_dict' in w:
+            w = w['state_dict']
+        model.load_state_dict(w)
     return model
 
 
@@ -117,6 +68,7 @@ class PrepProject(object):
                 if self.pre_crop_rect is not None:
                     img = img.crop(self.pre_crop_rect)
                 img = img.resize((self.load_size, self.load_size))
+                assert not Path(file_name).exists(), f'{file_name} already exists...'
                 img.save(file_name)
             new_filenames.append(file_name)
         return new_filenames
@@ -170,7 +122,7 @@ class GeoTfmDataset(data.Dataset):
         def apply_pil_tanspose(img, tfm_type):
             return img if tfm_type is None else img.transpose(tfm_type)
         def apply_pil_tanslate(img, prms):
-            return img if prms is None else translate_fill_mirror(img, prms[0], prms[1])
+            return img if prms is None else pil_translate_fill_mirror(img, prms[0], prms[1])
 
         if self.debug is not None: print(f'{self.debug}[{index}]')
 
@@ -186,7 +138,7 @@ class GeoTfmDataset(data.Dataset):
         # geometric transform #3: translate
         img = apply_pil_tanslate(img, self.geo_tfms[rot][2])
         # crop
-        img = random_crop(self, img)
+        img = pil_random_crop(self, img)
         # transform
         img = self.transform(img)
 
@@ -304,3 +256,66 @@ class TrainingScheme(pl.LightningModule):
     
     def save(self, weight_file):
         torch.save(self.model.state_dict(), weight_file)
+
+
+class DADGT(BaseAnoDet):
+    def __init__(self, params, skip_file_creation=False):
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        super().__init__(params=params)
+        self.skip_file_creation = skip_file_creation
+
+    def setup_train(self, train_samples):
+        deterministic_everything(self.params.seed + self.experiment_no, pytorch=True)
+        self.weight_name = f'{self.params.work_folder}/weights-{self.test_target}-'
+        #print(' model weight will be stored as:', self.weight_name)
+
+        self.prep =  PrepProject(f'dadgt-{self.params.project}-{self.test_target}', train_samples,
+                                 load_size=self.params.data.load_size, crop_size=self.params.data.crop_size,
+                                 suffix=self.params.suffix,
+                                 skip_file_creation=self.skip_file_creation
+                                )
+
+        # visualize to make sure data is fine
+        train_dataset = self.params.ds_cls(file_list=self.prep.train_files, load_size=self.prep.load_size,
+                                           crop_size=self.prep.crop_size, transform=ImageTransform(), random=True)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=self.params.fit.batch_size, shuffle=True)
+        batch_iterator = iter(train_dataloader)
+        imgs, labels = next(batch_iterator)
+        print(imgs.size(), labels.size(), len(train_dataset), len(train_dataloader), len(train_dataset.classes()))
+        plt_tiled_imshow(imgs[:10], [str(l) for l in labels.detach().cpu().numpy()])
+        del train_dataset, train_dataloader
+
+    def train_model(self, train_samples):
+        model = create_model(self.device, self.params.n_class, weight_file=None)
+        self.learner = TrainingScheme(self.device, model, self. params, self.prep.train_files, self.params.ds_cls)
+        chkpt_callback = pl.callbacks.ModelCheckpoint(self.weight_name+'{epoch}-{val_loss:.2f}',
+                                                      verbose=True, save_weights_only=True)
+
+        trainer = pl.Trainer(max_epochs=self.params.fit.epochs, gpus=torch.cuda.device_count(),
+                             checkpoint_callback=chkpt_callback, show_progress_bar=True)
+        trainer.fit(self.learner)
+        self.load_saved_checkpoint()
+
+    def load_saved_checkpoint(self):
+        def remove_model(state_dict):
+            replaced = {}
+            for k in state_dict:
+                new_k = k.replace('model.', '') if 'model.' == k[:len('model.')] else k
+                replaced[new_k] = state_dict[k]
+            return replaced
+        path = Path(self.weight_name)
+        path = max(path.parent.glob(path.name + '*.ckpt'), key=os.path.getctime)
+        print(' loading checkpoint:', path)
+        weights = remove_model(torch.load(path)['state_dict'])
+        self.learner.model.load_state_dict(weights)
+
+    def predict_test(self, test_samples):
+        self.prep.prepare_test(test_samples)
+        files = self.prep.test_files
+        ns = GeoTfmEval.simplified_normality(self.device, self.learner, files, self.params.n_class, bs_accel=1)
+        abnormalities = 1. - np.array(ns)
+        return abnormalities
+
+    def load_model(self, weight_file):
+        model = create_model(self.device, self.params.n_class, weight_file=weight_file)
+        self.learner = TrainingScheme(self.device, model, self.params, None, self.params.ds_cls)

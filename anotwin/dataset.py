@@ -9,7 +9,7 @@ import pandas as pd
 from pathlib import Path
 
 
-class ExtVisionDataset(datasets.VisionDataset):
+class AnoTwinBaseDataset(datasets.VisionDataset):
 
     def __init__(self, root, num_images, album_tfm, transform,
                  target_transform, load_size, crop_size, pre_crop_rect, random_crop):
@@ -25,14 +25,18 @@ class ExtVisionDataset(datasets.VisionDataset):
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         ])
+        self.base_seed = 0
 
     def set_epoch(self, epoch):
         self.epoch = epoch
 
+    def set_rand_base_seed(self, base_seed):
+        self.base_seed = base_seed
+
     def set_rand_seed(self, idx):
         """set random seed to keep albumentations transform
         the same among both normal and anomaly pair"""
-        random.seed(self.epoch + idx // 2)
+        random.seed(self.base_seed + self.epoch + idx // 2)
 
     def apply_tfms_crop(self, img, target, idx=0):
         # keep the album_tfm do the same among pair
@@ -52,7 +56,6 @@ class ExtVisionDataset(datasets.VisionDataset):
             x = max(0, (self.load_size - self.crop_size) // 2)
             y = max(0, (self.load_size - self.crop_size) // 2)
         img = img.crop((x, y, x + self.crop_size, y + self.crop_size))
-        #print(x, y, x + self.crop_size, y + self.crop_size)
 
         # extra pytorch transforms applied here - supposed NOT to transform spacially.
         if self.transform is not None:
@@ -81,7 +84,7 @@ class ExtVisionDataset(datasets.VisionDataset):
         return img
 
 
-class AnomalyTwinDataset(ExtVisionDataset):
+class AnomalyTwinDataset(AnoTwinBaseDataset):
     """Anomaly Twin dataset for Anomaly Detection."""
 
     def __init__(self, root, files, train=True, album_tfm=None, transform=None,
@@ -124,7 +127,7 @@ class AnomalyTwinDataset(ExtVisionDataset):
         """
         self.set_rand_seed(idx)
 
-        img_file, target = self.df.ix[idx, ['file', 'label']].values
+        img_file, target = self.df.loc[idx, ['file', 'label']].values
 
         # load image
         img = self.load_image(f'{self.root}/{img_file}')
@@ -205,7 +208,7 @@ class DefectOnBlobDataset(AnomalyTwinDataset):
         return x, y
 
     
-class AsIsDataset(ExtVisionDataset):
+class AsIsDataset(AnoTwinBaseDataset):
     """Dataset for load images as is."""
 
     def __init__(self, root, files, class_labels, album_tfm=None,
@@ -238,7 +241,7 @@ class AsIsDataset(ExtVisionDataset):
     def __getitem__(self, idx):
         self.set_rand_seed(idx)
 
-        img_file, target = self.df.ix[idx, ['file', 'label']].values
+        img_file, target = self.df.loc[idx, ['file', 'label']].values
         img = self.load_image(f'{self.root}/{img_file}')
         img, target = self.apply_tfms_crop(img, target, idx)
         img = self.to_tensor_norm(img)

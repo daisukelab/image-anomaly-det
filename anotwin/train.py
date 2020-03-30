@@ -3,7 +3,6 @@ import torch
 from torch import nn
 import time
 import copy
-from utils import to_np_img, visualize_cnn_grad_cam
 
 
 def _get_model_wts(det):
@@ -28,7 +27,7 @@ def train_model(det, criterion, optimizer, scheduler,
                      for phase in ['train', 'val']}
 
     for epoch in range(num_epochs):
-        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
+        print('Epoch {}/{}'.format(epoch, num_epochs), end='')
 
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
@@ -75,16 +74,15 @@ def train_model(det, criterion, optimizer, scheduler,
             epoch_loss = running_loss / dataset_sizes[phase]
             epoch_acc = running_corrects.double() / dataset_sizes[phase]
 
-            print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+            print(f'  {phase} loss: {epoch_loss:.4f} acc: {epoch_acc:.4f}', end='')
 
             # deep copy the model
             if phase == 'val' and epoch_loss < best_loss: #epoch_acc > best_acc:
                 best_acc = epoch_acc
                 best_loss = epoch_loss
                 best_model_wts = _get_model_wts(det)
-                print(f'Update: Best val Acc/Loss: {best_acc:4f}/{best_loss:4f}')
-
-        #print()
+                print(f'\nUpdate: Best val acc/loss: {best_acc:4f}/{best_loss:4f}', end='')
+        print()
 
     time_elapsed = time.time() - since
     print(f'Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s')

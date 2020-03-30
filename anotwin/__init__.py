@@ -1,3 +1,3 @@
-from .atwin_ad import *
+from .anotwin import *
 from .dataset import *
 from .train import *
