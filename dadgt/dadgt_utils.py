@@ -192,7 +192,8 @@ class GeoTfmEval(object):
     @staticmethod
     def calc(device, learner, files, labels, n_class, bs_accel=1):
         ns = GeoTfmEval.simplified_normality(device, learner, files, n_class, bs_accel=bs_accel)
-        fpr, tpr, thresholds = metrics.roc_curve(labels, ns)
+        abnormalities = 1. - np.array(ns)
+        fpr, tpr, thresholds = metrics.roc_curve(labels, abnormalities)
         auc = metrics.auc(fpr, tpr)
         return auc, ns
 

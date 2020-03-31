@@ -18,7 +18,7 @@ def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
 
     # determine test targets
     if test_targets is None:
-        test_targets = [d.name for d in data_root.glob('*') if d.is_dir()]
+        test_targets = sorted([d.name for d in data_root.glob('*') if d.is_dir()])
 
     # result data frame
     results = pd.DataFrame()

@@ -4,7 +4,6 @@ import numpy as np
 from dlcliche.image import show_2D_tSNE
 import sys
 from pytorch_cnn_visualizations.src.gradcam import GradCam
-from skimage.transform import resize
 import matplotlib.pyplot as plt
 import random
 from .options import Options
@@ -56,8 +55,10 @@ def show_heatmap(img, hm, label, alpha=0.5, ax=None, show_original=None):
     """Based on fast.ai implementation..."""
     if ax is None: _, ax = plt.subplots(1, 1)
     ax.set_title(label)
-    _im = to_norm_image(img[0])
-    _cm = resize(plt.cm.magma(plt.Normalize()(hm))[:, :, :3], _im.shape)
+    _im = to_np_img(img[0])
+    if hm.shape[:2] != _im.shape[:2]:
+        hm = Image.fromarray(hm).resize(_im.shape[1], _im.shape[0])
+    _cm = plt.cm.magma(plt.Normalize()(hm))[:, :, :3]
     img = (1 - alpha) * _im + alpha * _cm
     if show_original is not None:
         img = np.concatenate([_im, img], axis=0 if show_original == 'vertical' else 1)
