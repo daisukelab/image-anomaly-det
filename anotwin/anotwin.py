@@ -8,7 +8,7 @@ from torchvision import transforms, models
 from pathlib import Path
 import matplotlib.pyplot as plt
 from dlcliche.utils import (ensure_delete, ensure_folder, get_logger,
-                            copy_with_prefix, copy_any, deterministic_everything)
+                            copy_any, deterministic_everything)
 from dlcliche.image import show_np_image, subplot_matrix
 from dlcliche.math import n_by_m_distances, np_describe
 from sklearn import metrics
@@ -84,13 +84,13 @@ class AnoTwinDet(BaseAnoDet):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.logger = get_logger() if params.logger is None else params.logger
 
-    def setup_train(self, train_samples, model_weights=None, reset=True):
+    def setup_train(self, train_samples, train_set=None, model_weights=None, reset=True):
         if reset:
             self.reset_work(delete=True)
             assert len(list(self.test.glob('*'))) == 0, f'{self.test} still have files...'
         self.add_good_samples(train_samples)
         self.create_model(model_weights)
-        self.create_datasets()
+        self.create_datasets(train_set=train_set)
 
         # random seed
         base_seed = self.params.seed if 'seed' in self.params else 0
@@ -126,7 +126,12 @@ class AnoTwinDet(BaseAnoDet):
             add_good_samples(ABC.glob('*.jpg'), prefix='abc_')
         """
         self.logger.debug(f'Adding {len(files)} good samples to {self.good}.')
-        copy_with_prefix(files, self.good, prefix, symlinks=symlinks)
+        for f in files:
+            f = Path(f)
+            if not f.is_file():
+                raise Exception(f'Sample "{f}" doesn\'t exist.')
+            new_file_name = self.good/f'{prefix}{f.parent.name}-{f.name}'
+            copy_any(f, new_file_name, symlinks=symlinks)
 
     def list_good_samples(self):
         return sorted(self.good.glob(f'*{self.suffix}'))
@@ -153,7 +158,6 @@ class AnoTwinDet(BaseAnoDet):
         # copy to test folder.
         for f in files:
             f = Path(f)
-            # check files are firmly existing.
             if not f.is_file():
                 raise Exception(f'Test sample "{f}" doesn\'t exist.')
             new_file_name = self.test/f'{prefix}{f.parent.name}-{f.name}'
@@ -164,11 +168,23 @@ class AnoTwinDet(BaseAnoDet):
                 pd.DataFrame({'file': [new_file_name], 'label': [label]}),
             ])
 
-    def create_datasets(self):
+    def create_datasets(self, train_set=None):
         all_train_files = self.list_good_samples()
-        n_train = int(len(all_train_files) * (1 - self.valid_pct))
-        file_lists = {x: all_train_files[:n_train] if x is 'train' else all_train_files[n_train:]
-                         for x in ['train', 'val']}
+        if train_set is None:
+            n_train = int(len(all_train_files) * (1 - self.valid_pct))
+            file_lists = {x: all_train_files[:n_train] if x is 'train' else all_train_files[n_train:]
+                           for x in ['train', 'val']}
+        else:
+            def file_in_train_set(f):
+                f = str(f)
+                for f_in_ts in train_set:
+                    if f_in_ts in f: return True
+                return False
+            file_lists = {}
+            file_lists['train'] = [f for f in all_train_files if file_in_train_set(f)]
+            file_lists['val'] = [f for f in all_train_files if not file_in_train_set(f)]
+        self.logger.debug(f'val files: {file_lists["val"]}')
+
         self.ds = {x: self.dataset_cls(self.good, file_lists[x],
                                        load_size=self.load_size, crop_size=self.crop_size,
                                        album_tfm=self.train_album_tfm if x == 'train' else None,
@@ -264,7 +280,7 @@ class AnoTwinDet(BaseAnoDet):
                         lr=lr, weight_decay=weight_decay)
         return optimizer
 
-    def train_model(self, train_samples):
+    def train_model(self, train_samples=None, save=True):
         set_model_param_trainable(self.model, False)
         criterion = nn.CrossEntropyLoss()
         optimizer = self.optimizer(kind='sgd', lr=self.params.lr, weight_decay=0.9)
@@ -279,7 +295,9 @@ class AnoTwinDet(BaseAnoDet):
         result = train_model(self, criterion, optimizer, scheduler, self.dl,
                                    num_epochs=self.params.n_epochs, device=self.device)
 
-        self.save_model(f'weights_{self.test_target}', weights=result['best_weights'])
+        if save:
+            self.save_model(f'weights_{self.test_target}', weights=result['best_weights'])
+        return result
 
     def predict(self, test_samples):
         self.reset_test()
