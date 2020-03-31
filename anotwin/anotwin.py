@@ -15,9 +15,10 @@ from sklearn import metrics
 
 from utils import (get_embeddings, get_body_model,
                    visualize_cnn_grad_cam, visualize_embeddings,
-                   to_norm_image)
+                   to_norm_image, set_model_param_trainable)
 from anotwin.dataset import AnomalyTwinDataset, DefectOnBlobDataset, AsIsDataset
 from arcface_pytorch.models import ArcMarginProduct
+from onecyclelr import OneCycleLR
 
 sys.path.append('..')
 from base_ano_det import BaseAnoDet
@@ -32,9 +33,23 @@ _backbone_models = {
 }
 
 
-def set_trainable(model, flag):
-    for param in model.parameters():
-        param.requires_grad = flag
+class ArcFacePlus(nn.Module):
+    def __init__(self, num_ftrs=512, s=30, m=0.5):
+        super().__init__()
+        self.pre_head = nn.Sequential(
+            nn.BatchNorm1d(num_ftrs, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+            nn.Dropout(p=0.25, inplace=False),
+            nn.Linear(in_features=512, out_features=512, bias=True),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+            nn.Dropout(p=0.5, inplace=False)
+        )
+        self.arc = ArcMarginProduct(512, 2, s=s, m=m, easy_margin=False)
+
+    def forward(self, x, label):
+        x = x.view(x.size(0), -1) # Flatten
+        x = self.pre_head(x)
+        return self.arc(x, label)
 
 
 class AnoTwinDet(BaseAnoDet):
@@ -87,6 +102,7 @@ class AnoTwinDet(BaseAnoDet):
     def setup_runtime(self, model_weights):
         self.create_model(model_weights)
         self.model.eval()
+        self.metric_fc.eval()
         # create reference
         self.create_datasets()
         self.create_ref_dataset()
@@ -205,13 +221,9 @@ class AnoTwinDet(BaseAnoDet):
         base_model = self.get_backbone()(pretrained=True)
         self.model = (get_body_model(base_model)
                       .to(self.device))
-        #self.model = nn.DataParallel(self.model)
-        num_ftrs = base_model.fc.in_features
-        self.metric_fc = (ArcMarginProduct(num_ftrs, 2, s=30, m=0.5, easy_margin=False)
+        self.metric_fc = (ArcFacePlus(num_ftrs=base_model.fc.in_features)
                           .to(self.device))
-        #self.metric_fc = nn.DataParallel(self.metric_fc)
         self.logger.info(f'Created model.')
-
         if model_weights is not None:
             self.load_model(model_weights)
             self.logger.info(f' using model weight: {model_weights}')
@@ -240,27 +252,30 @@ class AnoTwinDet(BaseAnoDet):
 
     def optimizer(self, kind, lr, weight_decay):
         if kind == 'sgd':
-            optimizer = torch.optim.SGD([{'params': self.model.parameters()},
-                                         {'params': self.metric_fc.parameters()}],
-                                        lr=lr, weight_decay=weight_decay)
+            opt = torch.optim.SGD
+        elif kind == 'adam':
+            opt = torch.optim.Adam
+        elif kind == 'adamw':
+            opt = torch.optim.AdamW
         else:
-            optimizer = torch.optim.Adam([{'params': self.model.parameters()},
-                                          {'params': self.metric_fc.parameters()}],
-                                         lr=lr, weight_decay=weight_decay)
+            raise Exception('unknown opt')
+        optimizer = opt([{'params': self.model.parameters()},
+                         {'params': self.metric_fc.parameters()}],
+                        lr=lr, weight_decay=weight_decay)
         return optimizer
 
     def train_model(self, train_samples):
-        set_trainable(self.model, False)
+        set_model_param_trainable(self.model, False)
         criterion = nn.CrossEntropyLoss()
         optimizer = self.optimizer(kind='sgd', lr=self.params.lr, weight_decay=0.9)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.params.lr_step, gamma=0.1)
-        result = train_model(self, criterion, optimizer, scheduler, self.dl,
-                                   num_epochs=10, device=self.device)
+        scheduler = OneCycleLR(optimizer, num_steps=10, lr_range=(self.params.lr/10, self.params.lr))
+        result = train_model(self, criterion, optimizer, scheduler, self.dl, num_epochs=10, device=self.device)
 
-        set_trainable(self.model, True)
+        set_model_param_trainable(self.model, True)
         criterion = nn.CrossEntropyLoss()
-        optimizer = self.optimizer(kind='adam', lr=self.params.lr/10, weight_decay=self.params.weight_decay)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.params.lr_step, gamma=0.1)
+        optimizer = self.optimizer(kind='adamw', lr=self.params.lr/10, weight_decay=self.params.weight_decay)
+        scheduler = OneCycleLR(optimizer, num_steps=self.params.n_epochs,
+                               lr_range=(self.params.lr/100, self.params.lr/10))
         result = train_model(self, criterion, optimizer, scheduler, self.dl,
                                    num_epochs=self.params.n_epochs, device=self.device)
 
@@ -299,7 +314,7 @@ class AnoTwinDet(BaseAnoDet):
                     show_np_image(np.array(self.ds['test'].load_image(self.good/cur.train_x)), ax=ax)
                     ax.set_title(f'from good {cur.train_x}')
 
-    def eval_test(self, vis_class=None, aug_level=0, norm_level=1):
+    def eval_test(self, vis_class=None, aug_level=0, norm_level=1, text_only=False):
         self.create_test_dataset()
         test_embs, test_y = get_embeddings(self.model, self.dl['test'], self.device, return_y=True)
 
@@ -333,6 +348,9 @@ class AnoTwinDet(BaseAnoDet):
 
         result = distances, distance_df, (auc, fpr, tpr), worst_test_info
         print(f'AUC = {auc}')
+
+        if text_only:
+            return result
 
         # Results
         display(distance_df)

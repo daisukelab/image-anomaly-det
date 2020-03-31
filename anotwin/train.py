@@ -27,7 +27,7 @@ def train_model(det, criterion, optimizer, scheduler,
                      for phase in ['train', 'val']}
 
     for epoch in range(num_epochs):
-        print('Epoch {}/{}'.format(epoch, num_epochs), end='')
+        print(f'Epoch {epoch}/{num_epochs} lr:{optimizer.param_groups[0]["lr"]:.05f} m:{optimizer.param_groups[0]["momentum"]:.05f}', end='')
 
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
