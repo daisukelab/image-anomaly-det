@@ -30,6 +30,7 @@ from itertools import product
 from sklearn import metrics
 
 sys.path.append('..')
+from onecyclelr import OneCycleLR
 from base_ano_det import BaseAnoDet
 from utils import *
 
@@ -235,9 +236,14 @@ class TrainingScheme(pl.LightningModule):
         return {'avg_val_loss': avg_loss, 'log': tensorboard_logs}
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.params.fit.lr,
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.params.fit.lr,
                                 betas=(self.params.fit.b1, self.params.fit.b2),
                                 weight_decay=self.params.fit.weight_decay)
+        scheduler = OneCycleLR(optimizer, num_steps=self.params.fit.epochs,
+                           lr_range=(self.params.fit.lr//10, self.params.fit.lr))
+        # ... https://github.com/PyTorchLightning/pytorch-lightning/issues/1120
+        scheduler = {"scheduler": scheduler, "interval" : "step" }
+        return [optimizer], [scheduler]
 
     def get_dataloader(self, random_shuffle, files, bs=None): 
         ds = self.ds_cls(files,
@@ -293,7 +299,7 @@ class DADGT(BaseAnoDet):
                                                       verbose=True, save_weights_only=True)
 
         trainer = pl.Trainer(max_epochs=self.params.fit.epochs, gpus=torch.cuda.device_count(),
-                             checkpoint_callback=chkpt_callback, show_progress_bar=True)
+                             checkpoint_callback=chkpt_callback, show_progress_bar=self.params.fit.show_progress)
         trainer.fit(self.learner)
         self.load_saved_checkpoint()
 
