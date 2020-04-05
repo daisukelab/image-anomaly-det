@@ -8,10 +8,11 @@ from torchvision import transforms, models
 from pathlib import Path
 import matplotlib.pyplot as plt
 from dlcliche.utils import (ensure_delete, ensure_folder, get_logger,
-                            copy_any, deterministic_everything)
+                            deterministic_everything)
 from dlcliche.image import show_np_image, subplot_matrix
 from dlcliche.math import n_by_m_distances, np_describe
 from sklearn import metrics
+from PIL import Image
 
 from utils import (get_embeddings, get_body_model,
                    visualize_cnn_grad_cam, visualize_embeddings,
@@ -67,7 +68,7 @@ class AnoTwinDet(BaseAnoDet):
             DefectOnBlobImageList.
     """
 
-    def __init__(self, params, **kwargs):
+    def __init__(self, params, skip_file_creation=False, **kwargs):
         super().__init__(params=params)
         self.project, self.work = params.project, params.work_folder
         self.valid_pct, self.suffix, self.n_mosts = params.valid_pct, params.suffix, params.n_mosts
@@ -83,6 +84,8 @@ class AnoTwinDet(BaseAnoDet):
         self.reset_work(delete=False)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.logger = get_logger() if params.logger is None else params.logger
+        self.train_df = pd.DataFrame()
+        self.flag_create_files = not skip_file_creation
 
     def setup_train(self, train_samples, train_set=None, model_weights=None, reset=True):
         if reset:
@@ -114,7 +117,10 @@ class AnoTwinDet(BaseAnoDet):
             return _backbone_models[self.backbone]
         return self.backbone # expect this option to be a model object
 
-    def add_good_samples(self, files, prefix='', symlinks=False):
+    def get_good_filename(self, f):
+        return (self.good/f'{f.parent.name}-{f.name}').with_suffix(self.params.suffix)
+
+    def add_good_samples(self, files):
         """Add good (it is normal as well as training) image files.
 
         - All the images added will be handled as good (normal) samles later on
@@ -123,18 +129,23 @@ class AnoTwinDet(BaseAnoDet):
 
         Example:
             ABC = Path('path/to/abc')
-            add_good_samples(ABC.glob('*.jpg'), prefix='abc_')
+            add_good_samples(ABC.glob('*.jpg'))
         """
         self.logger.debug(f'Adding {len(files)} good samples to {self.good}.')
-        for f in files:
+        for f in sorted([str(f) for f in files]):
             f = Path(f)
             if not f.is_file():
                 raise Exception(f'Sample "{f}" doesn\'t exist.')
-            new_file_name = self.good/f'{prefix}{f.parent.name}-{f.name}'
-            copy_any(f, new_file_name, symlinks=symlinks)
+            new_file_name = self.get_good_filename(f)
+            if self.flag_create_files:
+                Image.open(f).convert('RGB').save(new_file_name)
+            self.train_df = pd.concat([
+                self.train_df,
+                pd.DataFrame({'file': [new_file_name]}),
+            ])
 
     def list_good_samples(self):
-        return sorted(self.good.glob(f'*{self.suffix}'))
+        return self.train_df.file.values
     
     def reset_work(self, delete=True, delete_all=False):
         if delete or delete_all:
@@ -152,17 +163,19 @@ class AnoTwinDet(BaseAnoDet):
     def reset_test(self):
         self.test_df = None
 
-    def set_test_samples(self, files, label='good', prefix='', symlinks=False):
+    def set_test_samples(self, files, label='good'):
         if 'test_df' not in self.__dict__:
             self.test_df = pd.DataFrame({'file': [], 'label': []})
         # copy to test folder.
-        for f in files:
+        for f in sorted([str(f) for f in files]):
             f = Path(f)
             if not f.is_file():
                 raise Exception(f'Test sample "{f}" doesn\'t exist.')
-            new_file_name = self.test/f'{prefix}{f.parent.name}-{f.name}'
-            copy_any(f, new_file_name, symlinks=symlinks)
-            # add to test data frame.
+            new_file_name = ((self.test/f'{f.parent.name}-{f.name}')
+                             .with_suffix(self.params.suffix))
+            if self.flag_create_files:
+                Image.open(f).convert('RGB').save(new_file_name)
+            # register file to test set.
             self.test_df = pd.concat([
                 self.test_df,
                 pd.DataFrame({'file': [new_file_name], 'label': [label]}),
@@ -175,6 +188,9 @@ class AnoTwinDet(BaseAnoDet):
             file_lists = {x: all_train_files[:n_train] if x is 'train' else all_train_files[n_train:]
                            for x in ['train', 'val']}
         else:
+            # convert train_set file names to local copy names.
+            train_set = [str(self.get_good_filename(f)) for f in train_set]
+            # get list of files in each set
             def file_in_train_set(f):
                 f = str(f)
                 for f_in_ts in train_set:
@@ -183,7 +199,9 @@ class AnoTwinDet(BaseAnoDet):
             file_lists = {}
             file_lists['train'] = [f for f in all_train_files if file_in_train_set(f)]
             file_lists['val'] = [f for f in all_train_files if not file_in_train_set(f)]
-        self.logger.debug(f'val files: {file_lists["val"]}')
+        self.logger.debug(f'all train files: {len(all_train_files)}, val files: {len(file_lists["val"])}')
+        if len(file_lists["val"]) == 0:
+            self.logger.debug('No val files, check train_set')
 
         self.ds = {x: self.dataset_cls(self.good, file_lists[x],
                                        load_size=self.load_size, crop_size=self.crop_size,
