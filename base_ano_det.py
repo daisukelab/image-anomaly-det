@@ -33,16 +33,13 @@ class BaseAnoDet(object):
     def load_model(self, *args, **kwargs):
         pass
 
-    def set_example(self, *args, **kwargs):
-        raise Exception('Implement me if you call this.')
-
     def predict_test(self, test_samples, *args, **kwargs):
         pass
 
-    def evaluate_test(self, test_samples, test_targets):
+    def evaluate_test(self, test_samples, test_y_trues):
         scores = self.predict_test(test_samples)
-        auc = metrics.roc_auc_score(test_targets, scores)
-        pauc = metrics.roc_auc_score(test_targets, scores,
+        auc = metrics.roc_auc_score(test_y_trues, scores)
+        pauc = metrics.roc_auc_score(test_y_trues, scores,
              max_fpr=self.params.max_fpr) if 'max_fpr' in self.params else None
 
         # TODO: optim threshold  calculation
