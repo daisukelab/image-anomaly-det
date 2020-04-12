@@ -27,7 +27,9 @@ def train_model(det, criterion, optimizer, scheduler,
                      for phase in ['train', 'val']}
 
     for epoch in range(num_epochs):
-        print(f'Epoch {epoch}/{num_epochs} lr:{optimizer.param_groups[0]["lr"]:.05f} m:{optimizer.param_groups[0]["momentum"]:.05f}', end='')
+        prm_grps = optimizer.param_groups[0]
+        momentum_str = f' m:{prm_grps["momentum"]:.05f}' if 'momentum' in prm_grps else ''
+        print(f'Epoch {epoch}/{num_epochs} lr:{prm_grps["lr"]:.07f}{momentum_str}', end='')
 
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:

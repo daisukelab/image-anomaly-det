@@ -16,14 +16,12 @@ This repository provides implementation of image anomaly detection methods using
 
 - Grad-CAM: Using pytorch_cnn_visualizations implementation.
 - ArcFace: Using arcface_pytorch implementation.
-- One cycle policy learning rate scheduler: Using implementation: https://github.com/dkumazaw/onecyclelr
 - Image Hashing: Using module provided as `imagehash`: https://github.com/JohannesBuchner/imagehash
 
 ```sh
 pip install -r requirements.txt
 git clone https://github.com/daisukelab/pytorch_cnn_visualizations
 git clone https://github.com/daisukelab/arcface_pytorch.git
-wget https://raw.githubusercontent.com/dkumazaw/onecyclelr/master/onecyclelr.py
 ```
 
 ## Example Results
