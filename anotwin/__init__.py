@@ -317,8 +317,10 @@ class AnoTwinDet(BaseAnoDet):
         self.metric_fc.load_state_dict(weights['metric_fc'])
 
     def load_model(self, save_name='trained_weights'):
-        self.model.load_state_dict(torch.load(self._model_fn(save_name, 'body')))
-        self.metric_fc.load_state_dict(torch.load(self._model_fn(save_name, 'metric-head')))
+        d = torch.load(self._model_fn(save_name, 'body'), map_location=self.device)
+        self.model.load_state_dict(d)
+        d = torch.load(self._model_fn(save_name, 'metric-head'), map_location=self.device)
+        self.metric_fc.load_state_dict(d)
 
     def clf_forward(self, inputs, labels):
         xs = self.model.forward(inputs)
