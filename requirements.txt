@@ -6,3 +6,4 @@ torchsummary
 dl-cliche
 imagehash
 tabulate
+jupyter

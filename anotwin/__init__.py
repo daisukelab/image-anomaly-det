@@ -52,32 +52,6 @@ class ArcFacePlus(nn.Module):
         return self.arc(x, label)
 
 
-def binary_clf_thresh_by_tpr(thresholds, tpr, min_tpr=1.0):
-    """Determine threshold by TPR.
-    Example:
-        distances, distance_df, (auc, fpr, tpr), worst_test_info = det.eval_test()
-        thresh = bin_clf_thresh_by_tpr(det.thresholds, tpr)
-    """
-    for th, rate in zip(thresholds, tpr):
-        if min_tpr <= rate:
-            return th
-    assert tpr[-1] == 1.0, f'TPR should have 1.0 at the end, why?'
-    return None
-
-
-def binary_clf_thresh_by_fpr(thresholds, fpr, max_fpr=0.1):
-    """Determine threshold by FPR.
-    Example:
-        distances, distance_df, (auc, fpr, tpr), worst_test_info = det.eval_test()
-        thresh = det.thresh_by_fpr(det.thresholds, fpr, max_fpr=your_max_fpr)
-    """
-    for th, next_rate in zip(thresholds, fpr[1:]):
-        if max_fpr <= next_rate:
-            return th
-    # Unfortunately or fortunately all threshold can be under the max_fpr.
-    return thresholds[-1]
-
-
 def dataloader_worker_init_fn(worker_id):
     random.seed(worker_id)
 
@@ -288,7 +262,6 @@ class AnoTwinDet(BaseAnoDet):
                                        for _trn, _test in zip(most_train_idxs, most_test_idxs)]
         most_test_info['train_idx'] = most_train_info.index
         most_test_info['train_x'] = most_train_info.file.values
-        most_test_info['train_y'] = most_train_info.label.values
         return most_test_info
 
     def create_model(self, model_weights=None):
@@ -366,25 +339,24 @@ class AnoTwinDet(BaseAnoDet):
             self.save_model(f'weights_{self.test_target}', weights=result['best_weights'])
         return result
 
-    def predict(self, test_samples):
+    def predict(self, test_samples, return_raw=False):
         self.reset_test()
         self.set_test_samples(test_samples)
         self.create_test_dataset()
         test_embs = get_embeddings(self.model, self.dl['test'], self.device, return_y=False)
-        distances = n_by_m_distances(test_embs, self.ref_embs)
-        return np.min(distances, axis=1)
+        sample_distances = n_by_m_distances(test_embs, self.ref_embs)
+        if return_raw:
+            return sample_distances.min(axis=-1), sample_distances
+        return sample_distances.min(axis=-1)
 
-    def normalize_distances(self, distances):
-        return distances / self.params.distance_norm_factor
-
-    def predict_test(self, test_samples):
+    def predict_test(self, test_samples, **kwargs):
         """Perform prediction for evaluation test.
         Note:
             Good samples are supposed to be added, or training is done in advance.
         """
         self.setup_runtime(model_weights=f'weights_{self.test_target}',
                            ref_samples=self.list_good_samples())
-        return self.predict(test_samples)
+        return self.predict(test_samples, **kwargs)
 
     def draw_heatmap(self, ax, file_name, cls, title='', show_original=None):
         """Draw heatmaps on given 2 axes.
@@ -422,101 +394,51 @@ class AnoTwinDet(BaseAnoDet):
                     show_np_image(np.array(self.ds['test'].load_image(self.good/cur.train_x)), ax=ax)
                     ax.set_title(f'from good {cur.train_x}')
 
-    def eval_test(self, vis_class=None, aug_level=0, norm_level=1, text_only=False):
-        self.create_test_dataset()
-        test_embs, test_y = get_embeddings(self.model, self.dl['test'], self.device, return_y=True)
+    def open_image(self, filename):
+        """Open as numpy image."""
+        return np.array(self.ds['test'].load_image(filename))
 
-        distances = n_by_m_distances(test_embs, self.ref_embs)
-
-        test_anomaly_mask = [y != self.ds['test'].classes.index('good') for y in test_y]
-        test_anomaly_idx = np.where(test_anomaly_mask)[0]
-        y_true = np.array(list(map(int, test_anomaly_mask)))
-
-        # 1. Get mean mutual distance
-        mean_mutual_class_distance = [[np.mean(distances[test_y == cur_test_y, :])]
-                               for cur_test_y in range(len(self.ds['test'].classes))]
-        distance_df = pd.DataFrame(mean_mutual_class_distance, columns=[self.project])
-        distance_df.index = self.ds['test'].classes
-        normalize_factor = max(distance_df.loc['good'].values[0], np.finfo(float).eps)
-        self.params.distance_norm_factor = normalize_factor
-
-        # 2. Normalize distances
-        distances /= normalize_factor
-        distance_df['normalized'] = distance_df[self.project] / normalize_factor
-
-        # Set normalized distances
-        preds = np.min(distances, axis=1)
-        self.ds['test'].df['distance'] = preds
-        self.test_df['distance'] = preds
-
-        # Get worst/best info
-
-        # 3. Get worst case
-        preds_y1 = preds[test_anomaly_mask]
-        worst_test_idxs = test_anomaly_idx[preds_y1.argsort()[:self.n_mosts]]
-        worst_test_info = self.get_test_xx_most_info(worst_test_idxs,
-                                                     distances, self.ds['ref'], self.ds['test'])
-
-        # 4. ROC/AUC
-        fpr, tpr, thresholds = metrics.roc_curve(y_true, preds)
-        auc = metrics.auc(fpr, tpr)
+    def visualize_after_eval(self, values, test_files, test_labels, test_y_trues):
+        auc, pauc, norm_threshs, norm_factor, scores, raw_scores = values
 
         print(f'AUC = {auc}')
 
-        # Total results
-        self.results = (distances, distance_df,
-                        (auc, fpr, tpr, thresholds, normalize_factor),
-                        worst_test_info)
+        # get worst test info
+        test_anomaly_idx = np.where(test_y_trues)[0]
+        scores_anomaly = scores[test_anomaly_idx]
+        worst_test_idxs = test_anomaly_idx[scores_anomaly.argsort()[:self.n_mosts]]
+        worst_test_info = self.get_test_xx_most_info(worst_test_idxs,
+                                                    raw_scores, self.ds['ref'], self.ds['test'])
 
-        if text_only:
-            return self.results
-
-        # Visualizations: distances
-        display(distance_df)
-
-        # Embeddings
-        labels = self.ds['test'].classes
-        good_first_labels = ['good'] + [l for l in labels if l != 'good']
-        good_first_map = {labels.index(good_first_labels[i]): i for i in range(len(labels))}
+        # visualize embeddings
+        classes = sorted(list(set(test_labels)))
+        classes = ['good'] + [l for l in classes if l != 'good']
+        test_embs = get_embeddings(self.model, self.dl['test'], self.device, return_y=False)
         visualize_embeddings(title='Class embeddings distribution', embeddings=test_embs,
-                             ys=map(lambda y: good_first_map[y], test_y),
-                             classes=good_first_labels)
+                            ys=[classes.index(label) for label in test_labels],
+                            classes=classes)
         plt.show()
 
         # Best/Worst cases per class
-        if vis_class == -1:
-            vis_class = 1 if self.ds['test'].classes[0] == 'good' else 0
-        for cls in range(len(self.ds['test'].classes)):
-            if vis_class is not None: # None = all
-                if self.ds['test'].classes[cls] == 'good': continue
-                if vis_class != cls: continue
-            test_mask = [y == cls for y in test_y]
+        for cls in classes:
+            test_mask = [label == cls for label in test_labels]
             test_idx = np.where(test_mask)[0]
-            preds_y1 = preds[test_mask]
+            scores_cls = scores[test_mask]
 
-            class_worst_test_idxs = test_idx[preds_y1.argsort()[:self.n_mosts]]
+            class_worst_test_idxs = test_idx[scores_cls.argsort()[:self.n_mosts]]
             worst_test_info = self.get_test_xx_most_info(class_worst_test_idxs,
-                                                         distances, self.ds['ref'], self.ds['test'])
-            class_best_test_idxs  = test_idx[preds_y1.argsort()[::-1][:self.n_mosts]]
+                                                        raw_scores, self.ds['ref'], self.ds['test'])
+            class_best_test_idxs  = test_idx[scores_cls.argsort()[::-1][:self.n_mosts]]
             best_test_info  = self.get_test_xx_most_info(class_best_test_idxs,
-                                                         distances, self.ds['ref'], self.ds['test'])
-            if self.ds['test'].classes[cls] == 'good':
+                                                        raw_scores, self.ds['ref'], self.ds['test'])
+            if cls == 'good':
                 worst_test_info, best_test_info = best_test_info, worst_test_info
 
-            self.show_test_matching_images('Best: ' + self.ds['test'].classes[cls], best_test_info)
+            self.show_test_matching_images('Best: ' + cls, best_test_info)
             plt.show()
 
-            self.show_test_matching_images('Worst: ' + self.ds['test'].classes[cls], worst_test_info)
+            self.show_test_matching_images('Worst: ' + cls, worst_test_info)
             plt.show()
-
-        return self.results
-
-    def calc_test_thresholds(self, max_fpr, min_tpr):
-        _, _, (_, fpr, tpr, thresholds, norm_factor), _ = self.results
-        return ([2.0, # 2 x mean mutual normalized distance (=normalized 1.0)
-                 binary_clf_thresh_by_fpr(thresholds, fpr, max_fpr=max_fpr),
-                 binary_clf_thresh_by_tpr(thresholds, tpr, min_tpr=min_tpr)],
-                norm_factor)
 
     def show_samples(self, phase='train', start_index=0, rows=3, columns=3, figsize=(15, 15)):
         for i, ax in enumerate(subplot_matrix(rows=rows, columns=columns, figsize=figsize)):

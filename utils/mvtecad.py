@@ -21,7 +21,7 @@ def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
         test_targets = sorted([d.name for d in data_root.glob('*') if d.is_dir()])
 
     # result data frame
-    results = pd.DataFrame()
+    result_df = pd.DataFrame()
 
     print('Evaluating:', test_targets)
     for test_target in test_targets:
@@ -29,7 +29,8 @@ def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
         target_data = data_root/test_target
         train_files = sorted(target_data.glob(f'train/good/*.png'))
         test_files = sorted(target_data.glob(f'test/*/*.png'))
-        test_y_trues = [f.parent.name != 'good' for f in test_files]
+        test_labels = [f.parent.name for f in test_files]
+        test_y_trues = [label != 'good' for label in test_labels]
 
         for exp in range(iteration):
 
@@ -49,18 +50,25 @@ def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
 
             # evaluate 
             print((' evaluating...'))
-            auc, pauc, scores = det.evaluate_test(test_files, test_y_trues)
+            values = det.evaluate_test(test_files, test_y_trues)
+            auc, pauc, norm_threshs, norm_factor, scores, raw_scores = values
 
             # store results
-            contents = {'target': [test_target], 'auc': [auc]}
+            contents = {'target': [test_target],
+                'auc': [auc],
+                'th_k_sigma': [norm_threshs[0]],
+                'th_fpr': [norm_threshs[1]],
+                'th_tpr': [norm_threshs[2]],
+                'norm_factor': [norm_factor],
+            }
             if pauc is not None:
                 contents['pauc']  = [pauc]
             this_result = pd.DataFrame(contents)
-            results = pd.concat([results, this_result], ignore_index=True)
-            
+            result_df = pd.concat([result_df, this_result], ignore_index=True)
+
             print(f'Results: {contents}')
 
     # write results
-    results.to_csv('results.csv', index=False)
+    result_df.to_csv('results.csv', index=False)
     print(('done.'))
-    return results
+    return result_df

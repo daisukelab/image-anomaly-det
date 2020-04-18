@@ -9,7 +9,7 @@ from base_ano_det import BaseAnoDet
 class ImgHashAnoDet(BaseAnoDet):
     """Anomaly Detector by using Image Hashing."""
 
-    def __init__(self, params):
+    def __init__(self, params, **kwargs):
         super().__init__(params)
         self.good_hashes = None
         self.hasher = (imagehash.phash if params.hash_algorithm == 'phash' else
@@ -18,6 +18,11 @@ class ImgHashAnoDet(BaseAnoDet):
         self.hash_size = params.hash_size
         # work folder
         self.work = Path(params.work_folder)/params.project
+
+    def open_image(self, filename):
+        img = Image.open(filename)
+        return (img if self.params.data.pre_crop_rect is None else
+                img.crop(self.params.data.pre_crop_rect))
 
     def build_good_hash(self, good_samples, cache=True):
         # build hash dictionary
@@ -30,12 +35,15 @@ class ImgHashAnoDet(BaseAnoDet):
                 return # files are the same, and hash size is the same
         self.good_hashes = {}
         for f in good_samples:
-            hash_value = self.hasher(Image.open(f), hash_size=self.hash_size)
+            hash_value = self.hasher(self.open_image(f), hash_size=self.hash_size)
             self.good_hashes[hash_value] = f
         # cache if needed
         if cache:
             self.save_model()
             print(' saved cache as', self._model_file())
+
+    def setup_runtime(self, model_weights, ref_samples):
+        self.build_good_hash(ref_samples, cache=True)
 
     def train_model(self, train_samples, cache=True, *args, **kwargs):
         self.build_good_hash(train_samples, cache=cache)
@@ -43,7 +51,9 @@ class ImgHashAnoDet(BaseAnoDet):
     def _model_file(self, file_name=None):
         ensure_folder(self.work)
         if file_name == None:
-            file_name = self.work/f'hashtable-{self.test_target}.pkl'
+            subname = (self.test_target if 'test_target' in self.__dict__ else
+                       self.params.project)
+            file_name = self.work/f'hashtable-{subname}.pkl'
         return file_name
 
     def save_model(self, file_name=None):
@@ -53,20 +63,27 @@ class ImgHashAnoDet(BaseAnoDet):
     def load_model(self, file_name=None):
         self.good_hashes = load_pkl(self._model_file(file_name))
 
-    def predict(self, file_name):
+    def predict(self, test_samples, return_raw=False):
         """Predict distance from prototype (good) samples.
+        
         Returns:
             distance in range [0, 1]. Smaller if file is closer to any of prototype sample.
         """
-        hash_value = self.hasher(Image.open(file_name), hash_size=self.hash_size)
-        ref_hashes = list(self.good_hashes.keys())
-        possible_max = hash_value.hash.shape[0] * hash_value.hash.shape[1]
-        # distance := mean Manhattan distance from dictionary hashes.
-        # `-` operation is implemented in imagehash module.
-        distances = [(hash_value - ref) / possible_max for ref in ref_hashes]
-        closest_idx = np.argmin(distances)
-        #print(hash_value, key_list[0], distances[closest_idx], distances[closest_idx: closest_idx+5])
-        return distances[closest_idx]
+        sample_distances = []
+        for file_name in test_samples:
+            hash_value = self.hasher(self.open_image(file_name), hash_size=self.hash_size)
+            ref_hashes = list(self.good_hashes.keys())
+            possible_max = hash_value.hash.shape[0] * hash_value.hash.shape[1]
+            # distance := mean Manhattan distance from dictionary hashes.
+            # `-` operation is implemented in imagehash module.
+            distances = [(hash_value - ref) / possible_max for ref in ref_hashes]
+            #closest_idx = np.argmin(distances)
+            #print(hash_value, key_list[0], distances[closest_idx], distances[closest_idx: closest_idx+5])
+            sample_distances.append(distances)
+        sample_distances = np.array(sample_distances)
+        if return_raw:
+            return sample_distances.min(axis=-1), sample_distances
+        return sample_distances.min(axis=-1)
 
-    def predict_test(self, test_samples, *args, **kwargs):
-        return [self.predict(f) for f in test_samples]
+    def predict_test(self, test_samples, **kwargs):
+        return self.predict(test_samples, **kwargs)
