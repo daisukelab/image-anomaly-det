@@ -11,21 +11,23 @@ from pathlib import Path
 
 class AnoTwinBaseDataset(datasets.VisionDataset):
 
-    def __init__(self, root, num_images, album_tfm, transform,
-                 target_transform, load_size, crop_size, pre_crop_rect, random_crop):
-        super().__init__(root, transform=transform,
+    def __init__(self, files, labels, album_tfm, transform,
+                 target_transform, load_size, crop_size, online_pre_crop_rect, random_crop):
+        super().__init__('.', transform=transform,
                          target_transform=target_transform)
 
         self.album_tfm = album_tfm
-        self.num_images = num_images
         self.load_size, self.crop_size = load_size, crop_size
-        self.pre_crop_rect, self.random_crop = pre_crop_rect, random_crop
+        self.online_pre_crop_rect, self.random_crop = online_pre_crop_rect, random_crop
         self.set_epoch(0)
         self.last_tfm = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         ])
         self.base_seed = 0
+
+        # keep files/labels in data frame
+        self.df = pd.DataFrame({'file': files, 'label': labels})
 
     def set_epoch(self, epoch):
         self.epoch = epoch
@@ -71,8 +73,8 @@ class AnoTwinBaseDataset(datasets.VisionDataset):
 
     def load_image(self, img_file, as_transformed=False, seed_idx=0):
         img = Image.open(img_file)
-        if self.pre_crop_rect:
-            img = img.crop(self.pre_crop_rect)
+        if self.online_pre_crop_rect:
+            img = img.crop(self.online_pre_crop_rect)
         img = img.resize((self.load_size, self.load_size))
         if img.mode != 'RGB':
             img = img.convert('RGB')
@@ -87,33 +89,25 @@ class AnoTwinBaseDataset(datasets.VisionDataset):
 class AnomalyTwinDataset(AnoTwinBaseDataset):
     """Anomaly Twin dataset for Anomaly Detection."""
 
-    def __init__(self, root, files, train=True, album_tfm=None, transform=None,
-                 target_transform=None, suffix='.png', load_size=224, crop_size=224,
+    def __init__(self, files, train=True, album_tfm=None, transform=None,
+                 target_transform=None, load_size=224, crop_size=224,
                  width_min=1, width_max=16, length_max=225//5, color=True,
-                 pre_crop_rect=None):
+                 online_pre_crop_rect=None):
 
-        super().__init__(root, len(files) * 2,
-                         album_tfm=album_tfm, transform=transform,
-                         target_transform=target_transform,
-                         load_size=load_size, crop_size=crop_size,
-                         pre_crop_rect=pre_crop_rect, random_crop=True)
-
-        self.suffix = suffix
-        self.width_min, self.width_max = width_min, width_max
-        self.length_max, self.color = length_max, color
+        # assign labels; normal, anomaly, normal, anomaly, ...
         self.classes = ['normal', 'anomaly']
-
-        root = Path(root)
-        # make list of files when it is None
-        if files is None:
-            files = [str(f) for f in root.glob('**/*'+suffix)]
-        files = [str(f).replace(str(root)+'/', '') for f in files]
-        # assign labels
         labels = [l for _ in range(len(files)) for l in range(len(self.classes))]
         # double the list of files
         files = [f for ff in files for f in [ff, ff]]
-        # keep them as data frame
-        self.df = pd.DataFrame({'file': files, 'label': labels})
+
+        super().__init__(files, labels,
+                         album_tfm=album_tfm, transform=transform,
+                         target_transform=target_transform,
+                         load_size=load_size, crop_size=crop_size,
+                         online_pre_crop_rect=online_pre_crop_rect, random_crop=True)
+
+        self.width_min, self.width_max = width_min, width_max
+        self.length_max, self.color = length_max, color
 
     def __len__(self):
         return len(self.df)
@@ -130,7 +124,7 @@ class AnomalyTwinDataset(AnoTwinBaseDataset):
         img_file, target = self.df.loc[idx, ['file', 'label']].values
 
         # load image
-        img = self.load_image(f'{self.root}/{img_file}')
+        img = self.load_image(img_file)
 
         # transform
         img, target = self.apply_tfms_crop(img, target)
@@ -183,16 +177,16 @@ class DefectOnBlobDataset(AnomalyTwinDataset):
 
     Note: Easy algorithm is used to find blob, could catch noises; increase BLOB_TH to avoid that.
     """
-    def __init__(self, root, files, train=True,
+    def __init__(self, files, train=True,
                  album_tfm=None, transform=None,
-                 target_transform=None, suffix='.png', load_size=224, crop_size=224,
+                 target_transform=None, load_size=224, crop_size=224,
                  width_min=1, width_max=14, length_max=225//5, color=True,
-                 pre_crop_rect=None, blob_th=20):
+                 online_pre_crop_rect=None, blob_th=20):
 
-        super().__init__(root, files, train, album_tfm=album_tfm, transform=transform,
+        super().__init__(files, train, album_tfm=album_tfm, transform=transform,
                          target_transform=target_transform,
-                         suffix=suffix, load_size=load_size, crop_size=crop_size,
-                         pre_crop_rect=pre_crop_rect,
+                         load_size=load_size, crop_size=crop_size,
+                         online_pre_crop_rect=online_pre_crop_rect,
                          width_min=width_min, width_max=width_max, 
                          length_max=length_max, color=color)
 
@@ -211,29 +205,19 @@ class DefectOnBlobDataset(AnomalyTwinDataset):
 class AsIsDataset(AnoTwinBaseDataset):
     """Dataset for load images as is."""
 
-    def __init__(self, root, files, class_labels, album_tfm=None,
+    def __init__(self, files, class_labels, album_tfm=None,
                  transform=None, target_transform=None,
-                 suffix='.png', load_size=224, crop_size=224, classes=None, pre_crop_rect=None):
+                 load_size=224, crop_size=224, classes=None, online_pre_crop_rect=None):
 
-        super().__init__(root, len(files) * 2,
+        # assign labels
+        self.classes = sorted(list(set(class_labels))) if classes is None else classes
+        labels = [self.classes.index(l) for l in class_labels]
+
+        super().__init__(files, labels,
                          album_tfm=album_tfm, transform=transform,
                          target_transform=target_transform,
                          load_size=load_size, crop_size=crop_size,
-                         pre_crop_rect=pre_crop_rect, random_crop=False)
-
-        self.suffix, self.load_size = suffix, load_size
-        self.classes = sorted(list(set(class_labels))) if classes is None else classes
-
-        root = Path(root)
-        # make list of files when it is None
-        if files is None:
-            files = [str(f) for f in root.glob('**/*'+suffix)]
-        files = [str(f).replace(str(root)+'/', '') for f in files]
-        # assign labels
-        labels = [self.classes.index(l) for l in class_labels]
-        # double the list of files
-        # keep them as data frame
-        self.df = pd.DataFrame({'file': files, 'label': labels})
+                         online_pre_crop_rect=online_pre_crop_rect, random_crop=False)
 
     def __len__(self):
         return len(self.df)
@@ -242,7 +226,7 @@ class AsIsDataset(AnoTwinBaseDataset):
         self.set_rand_seed(idx)
 
         img_file, target = self.df.loc[idx, ['file', 'label']].values
-        img = self.load_image(f'{self.root}/{img_file}')
+        img = self.load_image(img_file)
         img, target = self.apply_tfms_crop(img, target, idx)
         img = self.to_tensor_norm(img)
 

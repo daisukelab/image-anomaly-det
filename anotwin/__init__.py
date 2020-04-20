@@ -8,7 +8,7 @@ from torchvision import transforms, models
 from pathlib import Path
 import matplotlib.pyplot as plt
 from dlcliche.utils import (ensure_delete, ensure_folder, get_logger,
-                            deterministic_everything, random)
+                            deterministic_everything, random, get_class_distribution)
 from dlcliche.image import show_np_image, subplot_matrix
 from dlcliche.math import n_by_m_distances, np_describe
 from sklearn import metrics
@@ -18,7 +18,8 @@ from arcface_pytorch.models import ArcMarginProduct
 
 from utils import (get_embeddings, get_body_model,
                    visualize_cnn_grad_cam, visualize_embeddings,
-                   to_norm_image, set_model_param_trainable)
+                   maybe_this_or_none,
+                   to_raw_image, set_model_param_trainable)
 from anotwin.train import train_model
 from anotwin.dataset import AnomalyTwinDataset, DefectOnBlobDataset, AsIsDataset
 
@@ -77,146 +78,75 @@ class AnoTwinDet(BaseAnoDet):
         self.suffix, self.n_mosts = params.suffix, params.n_mosts
         self.load_size, self.crop_size = params.load_size, params.crop_size
         self.batch_size, self.workers = params.batch_size, params.workers
-        self.model, self.backbone = params.model, params.backbone
+        self.backbone = params.backbone
         self.train_album_tfm, self.train_tfm = params.train_album_tfm, params.train_tfm
         self.dataset_cls, self.val_ds_cls = params.dataset_cls, params.val_ds_cls
 
-        self.root = Path(self.work)/self.project
-        self.good, self.test = self.root/'good', self.root/'test'
-        self.runtime, self.weights = self.root/'runtime', self.root/'weights'
-        self.reset_work(delete=False)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
         self.logger = get_logger() if params.logger is None else params.logger
-        self.train_df = pd.DataFrame()
         self.ds, self.dl = {}, {}
         self.flag_create_files = not skip_file_creation
-
-    def setup_train(self, train_samples, train_set=None, model_weights=None, reset=True):
-        # set random seed
-        base_seed = self.params.seed if 'seed' in self.params else 0
-        base_seed += self.experiment_no
-        self.logger.info(f'Random seed: {base_seed}')
-        deterministic_everything(base_seed, pytorch=True)
-
-        # prepare files and datasets
-        if reset:
-            self.reset_work(delete=self.flag_create_files)
-            if self.flag_create_files:
-                assert len(list(self.test.glob('*'))) == 0, f'{self.test} still have files...'
-        self.add_good_samples(train_samples)
-        self.create_model(model_weights)
-        self.create_datasets(train_set=train_set)
-
-        # follow random seed
-        self.ds['train'].set_rand_base_seed(base_seed)
-        self.ds['val'].set_rand_base_seed(base_seed)
-
-    def setup_runtime(self, model_weights, ref_samples):
-        self.create_model(model_weights)
-        self.model.eval()
-        self.metric_fc.eval()
-        # create reference
-        self.add_good_samples(ref_samples)
-        self.create_ref_dataset()
-        self.ref_embs = get_embeddings(self.model, self.dl['ref'], self.device)
-        self.logger.info('Calculated reference embeddings.')
 
     def get_backbone(self):
         if type(self.backbone) == str and self.backbone in _backbone_models:
             return _backbone_models[self.backbone]
         return self.backbone # expect this option to be a model object
 
-    def get_good_filename(self, f):
-        return (self.good/f'{f.parent.name}-{f.name}').with_suffix(self.params.suffix)
+    def create_model(self, model_weights=None, **kwargs):
+        base_model = self.get_backbone()(pretrained=True)
+        self.model = (get_body_model(base_model)
+                      .to(self.device))
+        self.metric_fc = (ArcFacePlus(num_ftrs=base_model.fc.in_features)
+                          .to(self.device))
+        self.logger.info(f'Created model.')
+        if model_weights is not None:
+            self.load_model(model_weights)
+            self.logger.info(f' using model weight: {model_weights}')
 
-    def add_good_samples(self, files):
-        """Add good (it is normal as well as training) image files.
+    def setup_train(self, train_samples, train_set=None):
+        # set random seed
+        base_seed = self.params.seed if 'seed' in self.params else 0
+        base_seed += self.experiment_no
+        self.logger.info(f'Random seed: {base_seed}')
+        deterministic_everything(base_seed, pytorch=True)
 
-        - All the images added will be handled as good (normal) samles later on
-          throughout training/test/runtime phase.
-        - These images are used for calculating distances for test samples.
+        # prepare datasets
+        self.create_datasets(train_samples, train_set=train_set)
 
-        Example:
-            ABC = Path('path/to/abc')
-            add_good_samples(ABC.glob('*.jpg'))
-        """
-        self.logger.debug(f'Adding {len(files)} good samples to {self.good}.')
-        for f in sorted([str(f) for f in files]):
-            f = Path(f)
-            if not f.is_file():
-                raise Exception(f'Sample "{f}" doesn\'t exist.')
-            new_file_name = self.get_good_filename(f)
-            if self.flag_create_files:
-                Image.open(f).convert('RGB').save(new_file_name)
-            self.train_df = pd.concat([
-                self.train_df,
-                pd.DataFrame({'file': [new_file_name]}),
-            ])
+        # follow random seed
+        self.ds['train'].set_rand_base_seed(base_seed)
+        self.ds['val'].set_rand_base_seed(base_seed)
 
-    def list_good_samples(self):
-        return self.train_df.file.values
-    
-    def reset_work(self, delete=True, delete_all=False):
-        if delete or delete_all:
-            ensure_delete(self.good)
-            ensure_delete(self.test)
-            ensure_delete(self.runtime)
-        if delete_all:
-            ensure_delete(self.weights)
-        ensure_folder(self.root)
-        ensure_folder(self.good)
-        ensure_folder(self.test)
-        ensure_folder(self.runtime)
-        ensure_folder(self.weights)
-    
-    def reset_test(self):
-        self.test_df = None
+    def setup_runtime(self, ref_samples):
+        self.model.eval()
+        self.metric_fc.eval()
+        # create reference
+        self.create_ref_dataset(ref_samples)
+        self.ref_embs = get_embeddings(self.model, self.dl['ref'], self.device)
+        self.logger.info('Calculated reference embeddings.')
 
-    def set_test_samples(self, files, label='good'):
-        if 'test_df' not in self.__dict__:
-            self.test_df = pd.DataFrame({'file': [], 'label': []})
-        # copy to test folder.
-        for f in sorted([str(f) for f in files]):
-            f = Path(f)
-            if not f.is_file():
-                raise Exception(f'Test sample "{f}" doesn\'t exist.')
-            new_file_name = ((self.test/f'{f.parent.name}-{f.name}')
-                             .with_suffix(self.params.suffix))
-            if self.flag_create_files:
-                Image.open(f).convert('RGB').save(new_file_name)
-            # register file to test set.
-            self.test_df = pd.concat([
-                self.test_df,
-                pd.DataFrame({'file': [new_file_name], 'label': [label]}),
-            ])
-
-    def create_datasets(self, train_set=None):
-        all_train_files = self.list_good_samples()
+    def create_datasets(self, train_samples, train_set=None):
         if train_set is None:
-            n_train = int(len(all_train_files) * (1 - self.params.valid_pct))
-            file_lists = {x: all_train_files[:n_train] if x is 'train' else all_train_files[n_train:]
+            n_train = int(len(train_samples) * (1 - self.params.valid_pct))
+            file_lists = {x: train_samples[:n_train] if x is 'train' else train_samples[n_train:]
                            for x in ['train', 'val']}
         else:
-            # convert train_set file names to local copy names.
-            train_set = [str(self.get_good_filename(f)) for f in train_set]
+            # convert train_set path names to file names.
+            train_set = [Path(f).name for f in train_set]
             # get list of files in each set
-            def file_in_train_set(f):
-                f = str(f)
-                for f_in_ts in train_set:
-                    if f_in_ts in f: return True
-                return False
             file_lists = {}
-            file_lists['train'] = [f for f in all_train_files if file_in_train_set(f)]
-            file_lists['val'] = [f for f in all_train_files if not file_in_train_set(f)]
+            file_lists['train'] = [f for f in train_samples if Path(f).name in train_set]
+            file_lists['val'] = [f for f in train_samples if Path(f).name not in train_set]
         # duplicate validation set files by n times
         if 'valid_dup_n' in self.params:
             file_lists['val'] = list(file_lists['val']) * self.params.valid_dup_n
         # check data files
-        self.logger.debug(f'all train files: {len(all_train_files)}, val files: {len(file_lists["val"])}')
+        self.logger.debug(f'all train files: {len(train_samples)}, val files: {len(file_lists["val"])}')
         if len(file_lists["val"]) == 0:
             self.logger.debug('No val files, check train_set')
 
-        self.ds = {x: self.dataset_cls(self.good, file_lists[x],
+        self.ds = {x: self.dataset_cls(file_lists[x],
                                        load_size=self.load_size, crop_size=self.crop_size,
                                        album_tfm=self.train_album_tfm if x == 'train' else None,
                                        transform=self.train_tfm if x == 'train' else None,
@@ -224,7 +154,7 @@ class AnoTwinDet(BaseAnoDet):
                                        width_max=self.params.data.width_max,
                                        length_max=self.params.data.length_max,
                                        color=self.params.data.color,
-                                       pre_crop_rect=self.params.data.pre_crop_rect,
+                                       online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'),
                                       )
                    for x in ['train', 'val']}
         self.dl = {x: data.DataLoader(self.ds[x], batch_size=self.batch_size,
@@ -232,23 +162,21 @@ class AnoTwinDet(BaseAnoDet):
                                       worker_init_fn=dataloader_worker_init_fn)
                    for x in ['train', 'val']}
 
-    def create_ref_dataset(self):
-        files = self.list_good_samples()
-        self.ds['ref'] = self.val_ds_cls(self.good, files=files,
-                                         class_labels=['good'] * len(files),
+    def create_ref_dataset(self, train_samples):
+        self.ds['ref'] = self.val_ds_cls(files=train_samples,
+                                         class_labels=['good'] * len(train_samples),
                                          load_size=self.load_size, crop_size=self.crop_size,
                                          album_tfm=None, transform=None,
-                                         pre_crop_rect=self.params.data.pre_crop_rect)
+                                         online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'))
         self.dl['ref'] = data.DataLoader(self.ds['ref'], batch_size=self.batch_size,
                                          shuffle=False, num_workers=self.workers)
 
-
-    def create_test_dataset(self):
-        self.ds['test'] = self.val_ds_cls(self.test, files=self.test_df.file.values,
-                                          class_labels=self.test_df.label.values,
+    def create_test_dataset(self, test_samples, test_labels):
+        self.ds['test'] = self.val_ds_cls(files=test_samples,
+                                          class_labels=test_labels,
                                           load_size=self.load_size, crop_size=self.crop_size,
                                           album_tfm=None, transform=None,
-                                          pre_crop_rect=self.params.data.pre_crop_rect)
+                                          online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'))
         self.dl['test'] = data.DataLoader(self.ds['test'], batch_size=self.batch_size,
                                           shuffle=False, num_workers=self.workers)
 
@@ -264,32 +192,17 @@ class AnoTwinDet(BaseAnoDet):
         most_test_info['train_x'] = most_train_info.file.values
         return most_test_info
 
-    def create_model(self, model_weights=None):
-        base_model = self.get_backbone()(pretrained=True)
-        self.model = (get_body_model(base_model)
-                      .to(self.device))
-        self.metric_fc = (ArcFacePlus(num_ftrs=base_model.fc.in_features)
-                          .to(self.device))
-        self.logger.info(f'Created model.')
-        if model_weights is not None:
-            self.load_model(model_weights)
-            self.logger.info(f' using model weight: {model_weights}')
-
     def _model_fn(self, save_name, kind):
         return self.weights/f'{save_name}_{kind}.pth'
 
-    def save_model(self, save_name='trained_weights', weights=None):
+    def save_model(self, save_name='trained_weights', weights=None, **kwargs):
         if weights is None:
             weights = {'model': self.model.state_dict(),
                        'metric_fc': self.metric_fc.state_dict()}
         torch.save(weights['model'], self._model_fn(save_name, 'body'))
         torch.save(weights['metric_fc'], self._model_fn(save_name, 'metric-head'))
 
-    def set_model_weights(self, weights):
-        self.model.load_state_dict(weights['model'])
-        self.metric_fc.load_state_dict(weights['metric_fc'])
-
-    def load_model(self, save_name='trained_weights'):
+    def load_model(self, save_name='trained_weights', **kwargs):
         d = torch.load(self._model_fn(save_name, 'body'), map_location=self.device)
         self.model.load_state_dict(d)
         d = torch.load(self._model_fn(save_name, 'metric-head'), map_location=self.device)
@@ -339,24 +252,13 @@ class AnoTwinDet(BaseAnoDet):
             self.save_model(f'weights_{self.test_target}', weights=result['best_weights'])
         return result
 
-    def predict(self, test_samples, return_raw=False):
-        self.reset_test()
-        self.set_test_samples(test_samples)
-        self.create_test_dataset()
+    def predict(self, test_samples, test_labels=None, return_raw=False):
+        self.create_test_dataset(test_samples, ['good']*len(test_samples) if test_labels is None else test_labels)
         test_embs = get_embeddings(self.model, self.dl['test'], self.device, return_y=False)
         sample_distances = n_by_m_distances(test_embs, self.ref_embs)
         if return_raw:
             return sample_distances.min(axis=-1), sample_distances
         return sample_distances.min(axis=-1)
-
-    def predict_test(self, test_samples, **kwargs):
-        """Perform prediction for evaluation test.
-        Note:
-            Good samples are supposed to be added, or training is done in advance.
-        """
-        self.setup_runtime(model_weights=f'weights_{self.test_target}',
-                           ref_samples=self.list_good_samples())
-        return self.predict(test_samples, **kwargs)
 
     def draw_heatmap(self, ax, file_name, cls, title='', show_original=None):
         """Draw heatmaps on given 2 axes.
@@ -387,12 +289,16 @@ class AnoTwinDet(BaseAnoDet):
             for i, ax in enumerate(axes):
                 cur = most_test_info.loc[most_test_info.index[i]]
                 if j < 2:
-                    self.draw_heatmap(ax=ax, file_name=self.test/f'{cur.file}',
-                        cls=j, title=f'test/{cur.file}\nhas distance={cur.distance:.6f}',
+                    f = Path(cur.file)
+                    this_title = (f'{f.parent.name}/{f.name}\nhas distance={cur.distance:.6f}'
+                                  if j == 0 else '')
+                    self.draw_heatmap(ax=ax, file_name=cur.file,
+                        cls=j, title=this_title,
                         show_original=('vertical' if j == 0 else None))
                 else:
-                    show_np_image(np.array(self.ds['test'].load_image(self.good/cur.train_x)), ax=ax)
-                    ax.set_title(f'from good {cur.train_x}')
+                    f = Path(cur.train_x)
+                    show_np_image(np.array(self.ds['test'].load_image(cur.train_x)), ax=ax)
+                    ax.set_title(f'from {f.parent.name}/{f.name}')
 
     def open_image(self, filename):
         """Open as numpy image."""
@@ -401,7 +307,9 @@ class AnoTwinDet(BaseAnoDet):
     def visualize_after_eval(self, values, test_files, test_labels, test_y_trues):
         auc, pauc, norm_threshs, norm_factor, scores, raw_scores = values
 
-        print(f'AUC = {auc}')
+        self.logger.debug(f'# of test files: {len(test_files)}')
+        self.logger.debug('distribution' + str(get_class_distribution(test_labels)))
+        self.logger.info(f'AUC = {auc}')
 
         # get worst test info
         test_anomaly_idx = np.where(test_y_trues)[0]
@@ -444,7 +352,7 @@ class AnoTwinDet(BaseAnoDet):
         for i, ax in enumerate(subplot_matrix(rows=rows, columns=columns, figsize=figsize)):
             cur = start_index + i
             img, label = self.ds[phase][cur]
-            img = to_norm_image(img)
+            img = to_raw_image(img)
             ax.imshow(img)
             ax.set_title(f'{cur}:{self.ds[phase].classes[label]}')
 
@@ -453,14 +361,14 @@ class AnoTwinDet(BaseAnoDet):
             cur = start_index + i * 2
             img1, _ = self.ds[phase][cur]
             img2, _ = self.ds[phase][cur + 1]
-            img1, img2 = to_norm_image(img1), to_norm_image(img2)
+            img1, img2 = to_raw_image(img1), to_raw_image(img2)
             img = np.abs(img2 - img1)
             ax.imshow(img)
             ax.set_title(f'{cur}: {np_describe(img)}')
 
     def close_up_test_sample(self, img, label, ax=None, figsize=(15, 8)):
         img = img.unsqueeze(0)
-        np_img = to_norm_image(img)
+        np_img = to_raw_image(img)
         if ax is None:
             fig, ax = plt.subplots(1, 1, figsize=figsize)
         visualize_cnn_grad_cam(self.model.cpu(), img, label, target_class=0, target_layer=7,
@@ -479,15 +387,14 @@ class AnoTwinDet(BaseAnoDet):
                     y = self.ds['test'].classes.index('good') # force label as 'good'
                 label = self.ds['test'].classes[y] # class has to belong to test dataset
                 disp_label = f'{phase}[{count - 1}] as class: {label}'
-                close_up_test_sample(self, x, disp_label, ax=ax, figsize=figsize)
+                self.close_up_test_sample(x, disp_label, ax=ax, figsize=figsize)
 
                 if end and end < count:
                     break
 
     def __repr__(self):
         def tabbed(text): return text.replace('\n', '\n    ')
-        goods = f'# of good samples = {len(self.list_good_samples())}'
         trainset, validset = [f'{x} set:\n {tabbed(str(self.ds[x]) if "ds" in self.__dict__ else "not created yet")}.'
                               for x in ['train', 'val']]
-        lines = [goods, trainset, validset]
+        lines = [trainset, validset]
         return '\n'.join(lines)

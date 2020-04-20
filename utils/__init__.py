@@ -6,8 +6,6 @@ import sys
 from pytorch_cnn_visualizations.src.gradcam import GradCam
 import matplotlib.pyplot as plt
 import random
-from .options import Options
-from .mvtecad import evaluate_MVTecAD
 
 
 def get_body_model(model):
@@ -47,15 +45,11 @@ def visualize_embeddings(title, embeddings, ys, classes):
     return show_2D_tSNE(many_dim_vector=embeddings, target=[int(y) for y in ys], title=title, labels=classes)
 
 
-def to_norm_image(torch_img):
-    return ((torch_img.squeeze(0).numpy()) * 0.5 + 0.5).transpose(1, 2, 0)
-
-
 def show_heatmap(img, hm, label, alpha=0.5, ax=None, show_original=None):
     """Based on fast.ai implementation..."""
     if ax is None: _, ax = plt.subplots(1, 1)
     ax.set_title(label)
-    _im = to_norm_image(img[0])
+    _im = to_raw_image(img[0]) if isinstance(img[0], torch.Tensor) else img[0]
     if hm.shape[:2] != _im.shape[:2]:
         hm = Image.fromarray(hm).resize(_im.shape[1], _im.shape[0])
     _cm = plt.cm.magma(plt.Normalize()(hm))[:, :, :3]
@@ -78,29 +72,61 @@ def visualize_cnn_grad_cam(model, image, title, target_class=1, target_layer=7, 
     show_heatmap(image, cam, title, ax=ax, show_original=show_original)
 
 
-def to_raw_image(img, denorm_tensor=True):
-    if type(img) == torch.Tensor:
-        # denormalize
-        img = img.detach().cpu().numpy().transpose(1, 2, 0)
-        if denorm_tensor:
-            img = (img * 0.5) + 0.5
+def maybe_this_or_none(params, key):
+    return params[key] if key in params else None
+
+
+# --> will be moved to dl-cliche
+import re
+from pathlib import Path
+from dlcliche.utils import ensure_folder, is_array_like
+from PIL import Image
+
+
+def to_raw_image(torch_img, uint8=False, denorm=True):
+    # transpose channels.
+    if len(torch_img.shape) == 4: # batch color image N,C,H,W
+        img = torch_img.permute(0, 2, 3, 1)
+    elif len(torch_img.shape) == 3: # one color image C,H,W
+        img = torch_img.permute(1, 2, 0)
+    elif len(torch_img.shape) == 2: # one mono image H,W
+        img = torch_img
+    else:
+        raise ValueError(f'image has wrong shape: {len(torch_img.shape)}')
+    # single channel mono image (H,W,1) to be (H,W).
+    if img.shape[-1] == 1:
+        img = img.view(img.shape[:-1])
+    # send to the earth, and denorm.
+    img = img.detach().cpu().numpy()
+    if denorm:
+        img = img * 0.5 + 0.5
+    if uint8:
         img = (img * 255).astype(np.uint8)
     return img
 
 
-def pil_random_crop(opt, pil_img):
+def pil_crop(pil_img, crop_size, random_crop=True):
+    """Crop PIL image, randomly or from its center."""
+
     w, h = pil_img.size
-    if opt.random:
-        x = random.randint(0, np.maximum(0, w - opt.crop_size))
-        y = random.randint(0, np.maximum(0, h - opt.crop_size))
+    if is_array_like(crop_size):
+        crop_size_w, crop_size_h = crop_size
     else:
-        x = (w - opt.crop_size) // 2
-        y = (h - opt.crop_size) // 2
-    return pil_img.crop((x, y, x+opt.crop_size, y+opt.crop_size))
+        crop_size_w, crop_size_h = crop_size, crop_size
+
+    if random_crop:
+        x = random.randint(0, np.maximum(0, w - crop_size_w))
+        y = random.randint(0, np.maximum(0, h - crop_size_h))
+    else:
+        x = (w - crop_size_w) // 2
+        y = (h - crop_size_h) // 2
+
+    return pil_img.crop((x, y, x+crop_size_w, y+crop_size_h))
 
 
 def pil_translate_fill_mirror(img, dx, dy):
     """Translate (shift) image and fill empty part with mirror of the image."""
+
     w, h = img.size
     four = Image.new(img.mode, (w * 2, h * 2))
     # mirror along x axis
@@ -118,16 +144,19 @@ def pil_translate_fill_mirror(img, dx, dy):
     return four.crop((zx, zy, zx + w, zy + h))
 
 
-def plt_tiled_imshow(imgs, titles=None, col_max=5, axis=True):
-    n_row = (len(imgs) + col_max - 1) // col_max
+def plt_tiled_imshow(imgs, titles=None, n_cols=5, axis=True):
+    """Plot images in tiled fashion."""
+
+    n_row = (len(imgs) + n_cols - 1) // n_cols
     fig = plt.figure(figsize=(15, 3 * n_row))
     for row in range(n_row):
         for col in range(5):
-            i = row * col_max + col
+            i = row * n_cols + col
             if i >= len(imgs): break
 
-            plt.subplot(n_row, col_max, i+1)
-            x = to_raw_image(imgs[i].cpu().detach())
+            plt.subplot(n_row, n_cols, i+1)
+            x = imgs[i]
+            if isinstance(torch.Tensor): x = to_raw_image(x)
             if x.shape[-1] == 1: x = x.reshape(x.shape[:-1])
             plt.imshow(x)
             if titles is not None:
@@ -135,4 +164,57 @@ def plt_tiled_imshow(imgs, titles=None, col_max=5, axis=True):
             if not axis:
                 plt.axis('off')
 
+
+def number_in_str(text, default=0):
+    """Extract leftmost number found in given text in int."""
+
+    g = re.search('\d+', str(text))
+    return default if g is None else int(g.group(0))
+
+
+def preprocess_images(files, to_folder, size=None, mode=None, suffix='.png',
+                      pre_crop_rect=None, prepend=True, parent_name=True, verbose=True,
+                      skip_creation=False):
+    """Preprocess image files and put them in a folder with prepended serial number."""
+
+    to_folder = Path(to_folder)
+    ensure_folder(to_folder)
+    # get last existing number in to_folder, starting id = that + 1.
+    cur_id = max([0] + [number_in_str(f.name) for f in to_folder.glob('*'+suffix)]) + 1
+    if skip_creation:
+        cur_id = 1
+    # (w, h) for resize
+    if size is not None:
+        w, h = size if is_array_like(size) else (size, size)
+    # loop over files
+    new_names = []
+    for i, f in enumerate(files):
+        f = Path(f)
+        if not f.is_file():
+            raise Exception(f'Sample "{f}" doesn\'t exist.')
+        new_file_name = ((f'{cur_id + i}_' if prepend else '') +
+                         (f'{f.parent.name}_' if parent_name else '') +
+                         f.stem + suffix)
+        new_file_name = to_folder/new_file_name
+        new_names.append(new_file_name)
+        if skip_creation:
+            assert new_file_name.exists(), f'{new_file_name} Not Found...'
+            continue
+
+        img = Image.open(f)
+        if pre_crop_rect is not None:
+            img = img.crop(pre_crop_rect)
+        if size is not None:
+            img = img.resize((w, h))
+        if mode is not None:
+            img = img.convert(mode)
+        img.save(new_file_name)
+        if verbose:
+            print(f' {f.name} -> {to_folder.name}/{new_file_name.name}' +
+                  ('' if pre_crop_rect is None else f'pre_crop({pre_crop_rect}) -> ') +
+                  ('' if size is None else f' ({w}, {h})'))
+        else:
+            print(f' {cur_id + i}', end='')
+    print()
+    return new_names
 

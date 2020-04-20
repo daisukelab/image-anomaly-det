@@ -4,6 +4,7 @@ from PIL import Image
 import imagehash
 import numpy as np
 from base_ano_det import BaseAnoDet
+from utils import maybe_this_or_none
 
 
 class ImgHashAnoDet(BaseAnoDet):
@@ -16,13 +17,11 @@ class ImgHashAnoDet(BaseAnoDet):
                        imagehash.whash if params.hash_algorithm == 'whash' else
                        'unknown hash')
         self.hash_size = params.hash_size
-        # work folder
-        self.work = Path(params.work_folder)/params.project
 
     def open_image(self, filename):
         img = Image.open(filename)
-        return (img if self.params.data.pre_crop_rect is None else
-                img.crop(self.params.data.pre_crop_rect))
+        online_pre_crop_rect = maybe_this_or_none(self.params.data, 'online_pre_crop_rect')
+        return img if online_pre_crop_rect is None else img.crop(online_pre_crop_rect)
 
     def build_good_hash(self, good_samples, cache=True):
         # build hash dictionary
@@ -42,18 +41,23 @@ class ImgHashAnoDet(BaseAnoDet):
             self.save_model()
             print(' saved cache as', self._model_file())
 
-    def setup_runtime(self, model_weights, ref_samples):
+    def create_model(self, model_weights=None, **kwargs):
+        pass
+
+    def setup_train(self, train_samples, **kwargs):
+        pass
+
+    def setup_runtime(self, ref_samples):
         self.build_good_hash(ref_samples, cache=True)
 
     def train_model(self, train_samples, cache=True, *args, **kwargs):
         self.build_good_hash(train_samples, cache=cache)
 
     def _model_file(self, file_name=None):
-        ensure_folder(self.work)
         if file_name == None:
             subname = (self.test_target if 'test_target' in self.__dict__ else
                        self.params.project)
-            file_name = self.work/f'hashtable-{subname}.pkl'
+            file_name = self.work_folder/f'hashtable-{subname}.pkl'
         return file_name
 
     def save_model(self, file_name=None):
@@ -63,7 +67,7 @@ class ImgHashAnoDet(BaseAnoDet):
     def load_model(self, file_name=None):
         self.good_hashes = load_pkl(self._model_file(file_name))
 
-    def predict(self, test_samples, return_raw=False):
+    def predict(self, test_samples, test_labels=None, return_raw=False):
         """Predict distance from prototype (good) samples.
         
         Returns:
@@ -84,6 +88,3 @@ class ImgHashAnoDet(BaseAnoDet):
         if return_raw:
             return sample_distances.min(axis=-1), sample_distances
         return sample_distances.min(axis=-1)
-
-    def predict_test(self, test_samples, **kwargs):
-        return self.predict(test_samples, **kwargs)

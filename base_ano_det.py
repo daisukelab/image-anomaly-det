@@ -1,5 +1,7 @@
 from sklearn import metrics
 import numpy as np
+from pathlib import Path
+from dlcliche.utils import ensure_delete, ensure_folder
 
 
 def binary_clf_thresh_by_tpr(thresholds, tpr, min_tpr=1.0):
@@ -33,61 +35,104 @@ def binary_clf_thresh_by_fpr(thresholds, fpr, max_fpr=0.1):
 
 
 class BaseAnoDet(object):
-    """Anomaly Detector Abstract Base Class."""
+    """Anomaly Detector Base Class.
+
+    Training steps:
+        1. Call prepare_experiment(), prepare for fresh experiment.
+        2. Call create_model(), create model instance and load pre-trained weights.
+        3. Call setup_train(train_samples), prepare for training.
+        4. Call train_model(train_samples), execute training your model.
+        5. Call save_model(model_weights), saves your model weights.
+
+    Evaluate to calibrate thresholds and normalization factor:
+        1. Call evaluate_test(test_samples, test_y_trues),
+           will evaluate model and determine values.
+        2. Set `distance_threshold` and `distance_norm_factor` in params.
+
+    Runtime steps:
+        1. Call create_model(model_weights), create & load trained model weights.
+        2. Call setup_runtime(ref_samples), setup for runtime.
+        3. Call predict(test_samples), predict scores for test samples.
+        4. Call normalize_score(scores), normalize score for further use.
+    """
     
     def __init__(self, params=None):
         self.params = params
         self.experiment_no = None
+        self.test_target = None
+        self.work_folder = Path(self.params.work_folder)/self.params.project
+        self.weights = self.work_folder/'weights'
+        self.reset_work()
+
+    def reset_work(self, delete_all=False):
+        if delete_all:
+            ensure_folder(self.work_folder)
+        ensure_folder(self.work_folder)
+        ensure_folder(self.weights)
 
     def prepare_experiment(self, experiment_no=None, test_target=None):
+        """Prepare for fresh experiment."""
         if experiment_no is None:
             self.experiment_no = 0 if self.experiment_no is None else self.experiment_no + 1
         else:
             self.experiment_no = experiment_no
         self.test_target = test_target
 
+    def create_model(self, model_weights=None, **kwargs):
+        """Create and load model weights."""
+        raise NotImplementedError
+
     def setup_train(self, train_samples, **kwargs):
-        """(optional) Prepare for training, expected actions:
+        """Prepare for training, expected actions:
             Data conversion (data type, data format)
             Data caching
             Random seed setting
             Working folder setting
             Parameter updating
         """
-        pass
-
-    def setup_runtime(self, model_weights, ref_samples):
-        """(optional) Prepare dictionaries of reference samples for example."""
-        pass
+        raise NotImplementedError
 
     def train_model(self, train_samples, **kwargs):
-        raise Exception('Implement me if you call this.')
+        """Train your model."""
+        raise NotImplementedError
 
-    def load_model(self, **kwargs):
-        pass
+    def setup_runtime(self, ref_samples):
+        """Prepare for runtime.
+        Expected to prepare dictionaries of reference samples for example.
+        """
+        raise NotImplementedError
 
-    def predict_test(self, test_samples, return_raw=False, **kwargs):
+    def save_model(self, model_weights, **kwargs):
+        """Save model weights."""
+        raise NotImplementedError
+
+    def predict(self, test_samples, test_labels=None, return_raw=False, **kwargs):
         """Predict scores for test samples.
         Score can be either distance to closest reference samples,
         or normality score, or any metric value.
         Smaller value shows test sample is closer to reference sample.
 
         Args:
-            test_samples: Test samples to predict score.
+            test_samples (list): Test samples to predict score.
+            test_labels (list or None): None if not available, or corresponding labels.
             return_raw: Return raw score matrix (test x ref) in addition to scores.
 
         Returns:
-            Scores. **Not normalized.**
+            (scores, raw_scores) if return_raw else scores only.
+            Note that scores are **NOT normalized.**
         """
-        pass
+        raise NotImplementedError
+        if return_raw:
+            return None, None
+        return None
 
     def normalize_score(self, scores):
         if 'distance_norm_factor' not in self.params:
             raise ValueError(f'Set params.distance_norm_factor to normalize score.')
         return scores / self.params.distance_norm_factor
 
-    def evaluate_test(self, test_samples, test_y_trues, show_thresh=True):
-        scores, raw_scores = self.predict_test(test_samples, return_raw=True)
+    def evaluate_test(self, test_samples, test_y_trues, test_labels=None, show_thresh=True):
+        scores, raw_scores = self.predict(test_samples, test_labels=test_labels, return_raw=True)
         fpr, tpr, thresholds = metrics.roc_curve(test_y_trues, scores)
         auc = metrics.auc(fpr, tpr)
         pauc = metrics.roc_auc_score(test_y_trues, scores,

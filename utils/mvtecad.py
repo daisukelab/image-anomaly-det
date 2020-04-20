@@ -1,10 +1,32 @@
 from dlcliche.utils import *
 sys.path.append('..')
 from base_ano_det import BaseAnoDet
+from utils import preprocess_images
+
+
+def preprocess_project_images(params, det, raw_train_files,
+                              raw_test_files, skip_preprocess) -> (list, list):
+    if not skip_preprocess:
+        ensure_delete(det.work_folder/'train')
+        ensure_delete(det.work_folder/'test')
+    train_files = preprocess_images(raw_train_files, to_folder=det.work_folder/'train',
+        size=params.load_size if 'load_size' in params else None,
+        mode=None if 'color' not in params.data else 'RGB' if params.data.color else 'L',
+        suffix=params.suffix,
+        pre_crop_rect=params.data.pre_crop_rect,
+        skip_creation=skip_preprocess,
+        verbose=params.verbose if 'verbose' in params else False)
+    test_files = preprocess_images(raw_test_files, to_folder=det.work_folder/'test',
+        size=params.load_size if 'load_size' in params else None,
+        mode=None if 'color' not in params.data else 'RGB' if params.data.color else 'L',
+        suffix=params.suffix, pre_crop_rect=params.data.pre_crop_rect,
+        skip_creation=skip_preprocess,
+        verbose=params.verbose if 'verbose' in params else False)
+    return train_files, test_files
 
 
 def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
-                     test_targets=None, **kwargs):
+                     test_targets=None, skip_preprocess=False, **kwargs):
     """Evaluate anomaly detectors for entire MVTecAD dataset.
     
     Args:
@@ -27,30 +49,33 @@ def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
     for test_target in test_targets:
         print(f'\n--- Start evaluating [{test_target}] ----')
         target_data = data_root/test_target
-        train_files = sorted(target_data.glob(f'train/good/*.png'))
-        test_files = sorted(target_data.glob(f'test/*/*.png'))
-        test_labels = [f.parent.name for f in test_files]
+        raw_train_files = sorted(target_data.glob(f'train/good/*.png'))
+        raw_test_files = sorted(target_data.glob(f'test/*/*.png'))
+        test_labels = [f.parent.name for f in raw_test_files]
         test_y_trues = [label != 'good' for label in test_labels]
 
+        # create detector
+        det = ano_det_cls(params=params, **kwargs)
+
+        # preprocess data
+        print((' preprocessing...'))
+        train_files, test_files = preprocess_project_images(params, det,
+            raw_train_files, raw_test_files, skip_preprocess)
+
         for exp in range(iteration):
-
-            # create detector
-            det = ano_det_cls(params=params, **kwargs)
-
             # prepare
             det.prepare_experiment(experiment_no=exp, test_target=test_target)
 
-            # preprocess data
-            print((' preprocessing...'))
-            det.setup_train(train_files)
-
             # train
             print((' training...'))
+            det.create_model()
+            det.setup_train(train_files)
             det.train_model(train_files)
 
             # evaluate 
             print((' evaluating...'))
-            values = det.evaluate_test(test_files, test_y_trues)
+            det.setup_runtime(ref_samples=train_files)
+            values = det.evaluate_test(test_files, test_y_trues, test_labels=test_labels)
             auc, pauc, norm_threshs, norm_factor, scores, raw_scores = values
 
             # store results
