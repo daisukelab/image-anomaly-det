@@ -260,7 +260,21 @@ class AnoTwinDet(BaseAnoDet):
             return sample_distances.min(axis=-1), sample_distances
         return sample_distances.min(axis=-1)
 
-    def draw_heatmap(self, ax, file_name, cls, title='', show_original=None):
+    def draw_heatmap(self, file, distance, kind):
+        """Draw heatmap.
+        Args:
+            file (Path): File path name.
+            distance (float): Distance.
+            kind (str): 'ok' or 'ng' or anything to describe the file.
+        """
+        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        plt.tight_layout()
+        for i, ax in enumerate(axes):
+            self.draw_heatmap_part(ax=ax, file_name=file, cls=i,
+                title=(f'{kind} '+file.name if i == 0 else f'distance={distance:.5f}'))
+        return fig
+
+    def draw_heatmap_part(self, ax, file_name, cls, title='', show_original=None):
         """Draw heatmaps on given 2 axes.
         axes: 2 axes.
         cls: Class number: 0 (normal) or 1 (anomaly)
@@ -292,7 +306,7 @@ class AnoTwinDet(BaseAnoDet):
                     f = Path(cur.file)
                     this_title = (f'{f.parent.name}/{f.name}\nhas distance={cur.distance:.6f}'
                                   if j == 0 else '')
-                    self.draw_heatmap(ax=ax, file_name=cur.file,
+                    self.draw_heatmap_part(ax=ax, file_name=cur.file,
                         cls=j, title=this_title,
                         show_original=('vertical' if j == 0 else None))
                 else:

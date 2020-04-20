@@ -34,9 +34,9 @@ class EfficientGANAnoDet(BaseAnoDet):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     def create_model(self, model_weights=None, **kwargs):
-        self.G = Generator(z_dim=self.params.z_dim)
-        self.D = Discriminator(z_dim=self.params.z_dim)
-        self.E = Encoder(z_dim=self.params.z_dim)
+        self.G = Generator(z_dim=self.params.z_dim, color=self.params.data.color)
+        self.D = Discriminator(z_dim=self.params.z_dim, color=self.params.data.color)
+        self.E = Encoder(z_dim=self.params.z_dim, color=self.params.data.color)
         if model_weights is not None:
             self.load_model(model_weights)
         for model in [self.G, self.D, self.E]:
@@ -52,7 +52,7 @@ class EfficientGANAnoDet(BaseAnoDet):
         self.D.eval()
         self.E.eval()
 
-    def setup_train(self, **kwargs):
+    def setup_train(self, train_samples, **kwargs):
         pass
 
     def _transform(self):
@@ -69,33 +69,36 @@ class EfficientGANAnoDet(BaseAnoDet):
                 transform=self._transform(),
                 random=(phase == 'train'),
                 online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'),
-                mode='L')
+                mode='RGB' if self.params.data.color else 'L')
             self.dl[phase] = torch.utils.data.DataLoader(self.ds[phase],
                 batch_size=self.params.batch_size, shuffle=(phase == 'train'))
 
         self.to_train()
-        train_efficient_gan(self.device, self.params, self.G, self.D, self.E,
+        return train_efficient_gan(self.device, self.params, self.G, self.D, self.E,
             dataloader=self.dl['train'], lr=self.params.lr,
             num_epochs=self.params.n_epochs)
 
-    def setup_runtime(self, **kwargs):
+    def setup_runtime(self, ref_samples, **kwargs):
         pass
 
     def _model_fn(self, filename, kind):
         f = Path(filename)
         return f.parent/f'{f.stem}_{kind}.pth'
 
-    def save_model(self, model_weights, **kwargs):
+    def save_model(self, save_name, weights=None, **kwargs):
         def _save(model, kind):
-            f = self._model_fn(model_weights, kind)
+            f = self._model_fn(save_name, kind)
             torch.save(model.state_dict(), f)
+
+        # Todo: save `weights`
+
         _save(self.G, 'G')
         _save(self.D, 'D')
         _save(self.E, 'E')
 
-    def load_model(self, model_weights, **kwargs):
+    def load_model(self, save_name, **kwargs):
         def _load(model, kind):
-            d = torch.load(self._model_fn(model_weights, kind), map_location=self.device)
+            d = torch.load(self._model_fn(save_name, kind), map_location=self.device)
             model.load_state_dict(d)
         _load(self.G, 'G')
         _load(self.D, 'D')
@@ -108,7 +111,7 @@ class EfficientGANAnoDet(BaseAnoDet):
             transform=self._transform(),
             random=False,
             online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'),
-            mode='L')
+            mode='RGB' if self.params.data.color else 'L')
         self.dl['test'] = torch.utils.data.DataLoader(self.ds['test'],
             batch_size=self.params.batch_size, shuffle=False)
 
@@ -128,6 +131,50 @@ class EfficientGANAnoDet(BaseAnoDet):
             return scores, scores
         return scores
 
+    def draw_heatmap(self, file, distance, kind):
+        img = self.ds['test'].load_image(file)
+
+        with torch.no_grad():
+            z = self.E(img.unsqueeze(0).to(self.device))
+            z = torch.stack([z[0], z[0]]).to(self.device) # strange workaround...
+            fake_imgs = self.G(z)
+
+        org_img = to_raw_image(img)
+        reconst_img = to_raw_image(fake_imgs[0])
+
+        fig, axes = plt.subplots(1, 3, figsize=(10, 4))
+        plt.tight_layout()
+
+        axes[0].imshow(org_img)
+        axes[0].set_title(f'orignal {file.name}')
+        axes[0].axis('off')
+
+        axes[1].imshow(reconst_img)
+        axes[1].set_title(f'reconstructed')
+        axes[1].axis('off')
+
+        diff_img = np.abs(org_img.mean(axis=-1) - reconst_img.mean(axis=-1)) / 255.
+        axes[2].imshow(diff_img)
+        axes[2].set_title(f'error (distance:{distance:.8f})')
+        axes[2].axis('off')
+
+        return fig
+
+    def visualize_after_eval(self, values, test_files, test_labels, test_y_trues, top_k=2):
+        auc, pauc, norm_threshs, norm_factor, scores, raw_scores = values
+        scores /= norm_factor
+        classes = sorted(list(set(test_labels)))
+        test_labels = np.array(test_labels)
+        for c in classes:
+            mask = test_labels == c
+            idxs = np.where(mask)[0]
+            idxs = sorted(idxs, key=lambda idx: scores[idx])
+            print(f'Class [{c}] Best')
+            for idx in idxs[::-1][:top_k]:
+                self.draw_heatmap(test_files[idx], scores[idx], c); plt.show()
+            print(f'Class [{c}] Worst')
+            for idx in idxs[:top_k]:
+                self.draw_heatmap(test_files[idx], scores[idx], c); plt.show()
 
 def init_weights(m):
     classname = m.__class__.__name__
@@ -143,8 +190,9 @@ def init_weights(m):
 
 class Generator(nn.Module):
 
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim=20, color=True):
         super().__init__()
+        out_chs = 3 if color else 1
 
         self.layer1 = nn.Sequential(
             nn.Linear(z_dim, 1024),
@@ -165,7 +213,7 @@ class Generator(nn.Module):
         self.layer3 = nn.Sequential(*layers)
 
         self.last = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=64, out_channels=1,
+            nn.ConvTranspose2d(in_channels=64, out_channels=out_chs,
                                kernel_size=4, stride=2, padding=1),
             nn.Tanh())
 
@@ -183,11 +231,12 @@ class Generator(nn.Module):
 
 class Discriminator(nn.Module):
 
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim=20, color=True):
         super().__init__()
+        out_chs = 3 if color else 1
 
         self.x_layer1 = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=4,
+            nn.Conv2d(out_chs, 64, kernel_size=4,
                       stride=2, padding=1),
             nn.LeakyReLU(0.1, inplace=True))
 
@@ -229,11 +278,12 @@ class Discriminator(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, z_dim=20):
+    def __init__(self, z_dim=20, color=True):
         super().__init__()
+        out_chs = 3 if color else 1
 
         self.layer1 = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3,
+            nn.Conv2d(out_chs, 32, kernel_size=3,
                       stride=1),
             nn.LeakyReLU(0.1, inplace=True))
 
@@ -279,7 +329,10 @@ class CropResizeImgDataset(data.Dataset):
 
     def __getitem__(self, index):
         img_path = self.file_list[index]
-        img = Image.open(img_path).convert(self.mode)
+        return self.load_image(img_path)
+
+    def load_image(self, pathname):
+        img = Image.open(pathname).convert(self.mode)
         if self.online_pre_crop_rect:
             img = img.crop(self.online_pre_crop_rect)
         img = img.resize((self.load_size, self.load_size))
@@ -288,7 +341,7 @@ class CropResizeImgDataset(data.Dataset):
         return img
 
 
-def train_efficient_gan(device, params, G, D, E, dataloader, lr, num_epochs):
+def train_efficient_gan(device, params, G, D, E, dataloader, lr, num_epochs, disp_period=50):
 
     lr_ge = lr
     lr_d = lr/4
@@ -312,7 +365,8 @@ def train_efficient_gan(device, params, G, D, E, dataloader, lr, num_epochs):
         epoch_e_loss = 0.0
         epoch_d_loss = 0.0
 
-        print('Epoch {}/{}  '.format(epoch, num_epochs), end='')
+        if (epoch % disp_period) == 0:
+            print('Epoch {}/{}  '.format(epoch, num_epochs), end='')
 
         for imges in dataloader:
 
@@ -366,18 +420,21 @@ def train_efficient_gan(device, params, G, D, E, dataloader, lr, num_epochs):
             iteration += 1
 
         t_epoch_finish = time.time()
-        print(f'D_loss:{epoch_d_loss/batch_size:.4f} G_loss:{epoch_g_loss/batch_size:.4f}'
-              f' E_loss:{epoch_e_loss/batch_size:.4f}  {t_epoch_finish - t_epoch_start:.4f} sec.')
+        if (epoch % disp_period) == 0:
+            print(f'D_loss:{epoch_d_loss/batch_size:.4f} G_loss:{epoch_g_loss/batch_size:.4f}'
+                  f' E_loss:{epoch_e_loss/batch_size:.4f}  {t_epoch_finish - t_epoch_start:.4f} sec.')
         t_epoch_start = time.time()
+    return {'best_weights': {'D': D.state_dict(), 'G': G.state_dict(), 'E': E.state_dict()}}
 
 
-def visualize_train_and_generated(device, G, train_dataloader, E=None, batch_size=8, z_dim=20):
-    """Note: Nothing related between training and generated image. z is random if E is empty."""
-    batch_iterator = iter(train_dataloader)
+def visualize_train_and_generated(device, G, dataloader, E=None, batch_size=8, z_dim=20):
+    """Note: If E is empty, nothing related between loaded image and generated image, z is random."""
+    batch_iterator = iter(dataloader)
     imgs = next(batch_iterator)
 
-    z = torch.randn(batch_size, z_dim) if E is None else E(imgs.to(device))
-    fake_imgs = G(z.to(device))
+    with torch.no_grad():
+        z = torch.randn(batch_size, z_dim) if E is None else E(imgs.to(device))
+        fake_imgs = G(z.to(device))
 
     fig = plt.figure(figsize=(15, 6))
     for i in range(0, 5):
