@@ -30,7 +30,6 @@ from itertools import product
 from sklearn import metrics
 
 sys.path.append('..')
-from onecyclelr import OneCycleLR
 from base_ano_det import BaseAnoDet
 from utils import *
 
@@ -45,46 +44,6 @@ def create_model(device, n_class, weight_file=None, base_model=models.resnet18):
             w = w['state_dict']
         model.load_state_dict(w)
     return model
-
-
-class PrepProject(object):
-    """Prepare project folders/files."""
-
-    def __init__(self, project_name, train_files, load_size, crop_size, suffix,
-                 pre_crop_rect=None, extra='', skip_file_creation=False):
-        self.project, self.load_size, self.crop_size = project_name, load_size, crop_size
-        self.suffix, self.pre_crop_rect, self.extra = suffix, pre_crop_rect, extra
-        self.root = Path(f'./tmp/{self.project}')
-        self.train = self.root/'train'
-        self.test = self.root/'test'
-        self.prepare_train(train_files, skip_file_creation)
-
-    def copy_files_pre_crop(self, dest, files, skip_file_creation):
-        new_filenames = []
-        for f in files:
-            file_name = str((dest/f'{f.parent.name}-{f.name}').with_suffix(self.suffix))
-            assert file_name not in new_filenames
-            if not skip_file_creation:
-                img = Image.open(f).convert('RGB')
-                if self.pre_crop_rect is not None:
-                    img = img.crop(self.pre_crop_rect)
-                img = img.resize((self.load_size, self.load_size))
-                assert not Path(file_name).exists(), f'{file_name} already exists...'
-                img.save(file_name)
-            new_filenames.append(file_name)
-        return new_filenames
-
-    def prepare_train(self, train_files, skip_file_creation):
-        if not skip_file_creation:
-            ensure_delete(self.train)
-            ensure_folder(self.train)
-        self.train_files = self.copy_files_pre_crop(self.train, train_files, skip_file_creation)
-
-    def prepare_test(self, test_files, skip_file_creation=False):
-        if not skip_file_creation:
-            ensure_delete(self.test)
-            ensure_folder(self.test)
-        self.test_files = self.copy_files_pre_crop(self.test, test_files, skip_file_creation=skip_file_creation)
 
 
 class ImageTransform():
@@ -139,7 +98,7 @@ class GeoTfmDataset(data.Dataset):
         # geometric transform #3: translate
         img = apply_pil_tanslate(img, self.geo_tfms[rot][2])
         # crop
-        img = pil_random_crop(self, img)
+        img = pil_crop(img, crop_size=self.crop_size, random_crop=self.random)
         # transform
         img = self.transform(img)
 
@@ -239,16 +198,17 @@ class TrainingScheme(pl.LightningModule):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.params.fit.lr,
                                 betas=(self.params.fit.b1, self.params.fit.b2),
                                 weight_decay=self.params.fit.weight_decay)
-        scheduler = OneCycleLR(optimizer, num_steps=self.params.fit.epochs,
-                           lr_range=(self.params.fit.lr//10, self.params.fit.lr))
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=self.params.fit.lr/10,
+                max_lr=self.params.fit.lr, step_size_up=self.params.fit.epochs//4,
+                step_size_down=None, cycle_momentum=False, mode='exp_range', gamma=0.98)
         # ... https://github.com/PyTorchLightning/pytorch-lightning/issues/1120
         scheduler = {"scheduler": scheduler, "interval" : "step" }
         return [optimizer], [scheduler]
 
     def get_dataloader(self, random_shuffle, files, bs=None): 
         ds = self.ds_cls(files,
-                          load_size=self.params.data.load_size,
-                          crop_size=self.params.data.crop_size,
+                          load_size=self.params.load_size,
+                          crop_size=self.params.crop_size,
                           transform=ImageTransform(),
                           random=random_shuffle)
         return torch.utils.data.DataLoader(ds,
@@ -266,35 +226,32 @@ class TrainingScheme(pl.LightningModule):
 
 
 class DADGT(BaseAnoDet):
-    def __init__(self, params, skip_file_creation=False):
+    def __init__(self, params):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         super().__init__(params=params)
-        self.skip_file_creation = skip_file_creation
 
     def setup_train(self, train_samples):
         deterministic_everything(self.params.seed + self.experiment_no, pytorch=True)
         self.weight_name = f'{self.params.work_folder}/weights-{self.test_target}-'
         #print(' model weight will be stored as:', self.weight_name)
 
-        self.prep =  PrepProject(f'dadgt-{self.params.project}-{self.test_target}', train_samples,
-                                 load_size=self.params.data.load_size, crop_size=self.params.data.crop_size,
-                                 suffix=self.params.suffix,
-                                 skip_file_creation=self.skip_file_creation
-                                )
+        self.learner = TrainingScheme(self.device, self.model, self. params, train_samples, self.params.ds_cls)
 
         # visualize to make sure data is fine
-        train_dataset = self.params.ds_cls(file_list=self.prep.train_files, load_size=self.prep.load_size,
-                                           crop_size=self.prep.crop_size, transform=ImageTransform(), random=True)
+        train_dataset = self.params.ds_cls(file_list=train_samples, load_size=self.params.load_size,
+                                           crop_size=self.params.crop_size, transform=ImageTransform(), random=True)
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=self.params.fit.batch_size, shuffle=True)
         batch_iterator = iter(train_dataloader)
         imgs, labels = next(batch_iterator)
         print(imgs.size(), labels.size(), len(train_dataset), len(train_dataloader), len(train_dataset.classes()))
-        plt_tiled_imshow(imgs[:10], [str(l) for l in labels.detach().cpu().numpy()])
+        np_imgs = [to_raw_image(img) for img in imgs[:10]]
+        plt_tiled_imshow(imgs=np_imgs, titles=[str(l) for l in labels.detach().cpu().numpy()])
         del train_dataset, train_dataloader
 
+    def create_model(self, weight_file=None, **kwargs):
+        self.model = create_model(self.device, self.params.n_class, weight_file=weight_file)
+
     def train_model(self, train_samples):
-        model = create_model(self.device, self.params.n_class, weight_file=None)
-        self.learner = TrainingScheme(self.device, model, self. params, self.prep.train_files, self.params.ds_cls)
         chkpt_callback = pl.callbacks.ModelCheckpoint(self.weight_name+'{epoch}-{val_loss:.2f}',
                                                       verbose=True, save_weights_only=True)
 
@@ -310,19 +267,22 @@ class DADGT(BaseAnoDet):
                 new_k = k.replace('model.', '') if 'model.' == k[:len('model.')] else k
                 replaced[new_k] = state_dict[k]
             return replaced
+        # find last saved (=best metric) checkpoint.
         path = Path(self.weight_name)
         path = max(path.parent.glob(path.name + '*.ckpt'), key=os.path.getctime)
         print(' loading checkpoint:', path)
         weights = remove_model(torch.load(path)['state_dict'])
-        self.learner.model.load_state_dict(weights)
+        self.model.load_state_dict(weights)
 
-    def predict_test(self, test_samples):
-        self.prep.prepare_test(test_samples)
-        files = self.prep.test_files
-        ns = GeoTfmEval.simplified_normality(self.device, self.learner, files, self.params.n_class, bs_accel=1)
+    def predict(self, test_samples, test_labels=None, return_raw=False):
+        ns = GeoTfmEval.simplified_normality(self.device, self.learner, test_samples, self.params.n_class, bs_accel=1)
         abnormalities = 1. - np.array(ns)
+        if return_raw:
+            return abnormalities, abnormalities
         return abnormalities
 
     def load_model(self, weight_file):
-        model = create_model(self.device, self.params.n_class, weight_file=weight_file)
-        self.learner = TrainingScheme(self.device, model, self.params, None, self.params.ds_cls)
+        self.model = create_model(self.device, self.params.n_class, weight_file=weight_file)
+
+    def setup_runtime(self, ref_samples):
+        self.learner = TrainingScheme(self.device, self.model, self.params, None, self.params.ds_cls)

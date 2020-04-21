@@ -72,7 +72,7 @@ class AnoTwinDet(BaseAnoDet):
             DefectOnBlobImageList.
     """
 
-    def __init__(self, params, skip_file_creation=False, **kwargs):
+    def __init__(self, params, **kwargs):
         super().__init__(params=params)
         self.project, self.work = params.project, params.work_folder
         self.suffix, self.n_mosts = params.suffix, params.n_mosts
@@ -86,7 +86,6 @@ class AnoTwinDet(BaseAnoDet):
 
         self.logger = get_logger() if params.logger is None else params.logger
         self.ds, self.dl = {}, {}
-        self.flag_create_files = not skip_file_creation
 
     def get_backbone(self):
         if type(self.backbone) == str and self.backbone in _backbone_models:
@@ -244,7 +243,7 @@ class AnoTwinDet(BaseAnoDet):
             scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, total_steps=self.params.n_epochs,
                             max_lr=self.params.lr, final_div_factor=100)
         else:
-            scheduler = 'unknown scheduler'
+            raise Exception('unknown scheduler')
         result = train_model(self, criterion, optimizer, scheduler, self.dl,
                                    num_epochs=self.params.n_epochs, device=self.device)
 
