@@ -12,13 +12,15 @@ from pathlib import Path
 class AnoTwinBaseDataset(datasets.VisionDataset):
 
     def __init__(self, files, labels, album_tfm, transform,
-                 target_transform, load_size, crop_size, online_pre_crop_rect, random_crop):
+                 target_transform, load_size, crop_size, online_pre_crop_rect,
+                 random_crop, mixup_alpha):
         super().__init__('.', transform=transform,
                          target_transform=target_transform)
 
         self.album_tfm = album_tfm
         self.load_size, self.crop_size = load_size, crop_size
-        self.online_pre_crop_rect, self.random_crop = online_pre_crop_rect, random_crop
+        self.online_pre_crop_rect = online_pre_crop_rect
+        self.random_crop, self.mixup_alpha = random_crop, mixup_alpha
         self.set_epoch(0)
         self.last_tfm = transforms.Compose([
             transforms.ToTensor(),
@@ -28,6 +30,9 @@ class AnoTwinBaseDataset(datasets.VisionDataset):
 
         # keep files/labels in data frame
         self.df = pd.DataFrame({'file': files, 'label': labels})
+
+    def __len__(self):
+        return len(self.df)
 
     def set_epoch(self, epoch):
         self.epoch = epoch
@@ -43,6 +48,14 @@ class AnoTwinBaseDataset(datasets.VisionDataset):
     def apply_tfms_crop(self, img, target, idx=0):
         # keep the album_tfm do the same among pair
         #self.set_rand_seed(idx)
+
+        # mixup
+        if self.mixup_alpha > 0.0:
+            lambd = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+            img_file = self.df.sample().file.values[0]
+            counter_img = self.load_image(img_file)
+            img = np.array(img) * lambd + np.array(counter_img) * (1 - lambd)
+            img = Image.fromarray(img.astype(np.uint8))
 
         # augment here
         if self.album_tfm is not None:
@@ -92,7 +105,7 @@ class AnomalyTwinDataset(AnoTwinBaseDataset):
     def __init__(self, files, train=True, album_tfm=None, transform=None,
                  target_transform=None, load_size=224, crop_size=224,
                  width_min=1, width_max=16, length_max=225//5, color=True,
-                 online_pre_crop_rect=None):
+                 online_pre_crop_rect=None, random_crop=True, mixup_alpha=0.0):
 
         # assign labels; normal, anomaly, normal, anomaly, ...
         self.classes = ['normal', 'anomaly']
@@ -104,13 +117,12 @@ class AnomalyTwinDataset(AnoTwinBaseDataset):
                          album_tfm=album_tfm, transform=transform,
                          target_transform=target_transform,
                          load_size=load_size, crop_size=crop_size,
-                         online_pre_crop_rect=online_pre_crop_rect, random_crop=True)
+                         online_pre_crop_rect=online_pre_crop_rect,
+                         random_crop=random_crop,
+                         mixup_alpha=mixup_alpha)
 
         self.width_min, self.width_max = width_min, width_max
         self.length_max, self.color = length_max, color
-
-    def __len__(self):
-        return len(self.df)
 
     def __getitem__(self, idx):
         """
@@ -181,14 +193,16 @@ class DefectOnBlobDataset(AnomalyTwinDataset):
                  album_tfm=None, transform=None,
                  target_transform=None, load_size=224, crop_size=224,
                  width_min=1, width_max=14, length_max=225//5, color=True,
-                 online_pre_crop_rect=None, blob_th=20):
+                 online_pre_crop_rect=None, blob_th=20,
+                 random_crop=True, mixup_alpha=0.0):
 
         super().__init__(files, train, album_tfm=album_tfm, transform=transform,
                          target_transform=target_transform,
                          load_size=load_size, crop_size=crop_size,
                          online_pre_crop_rect=online_pre_crop_rect,
                          width_min=width_min, width_max=width_max, 
-                         length_max=length_max, color=color)
+                         length_max=length_max, color=color,
+                         random_crop=random_crop, mixup_alpha=mixup_alpha)
 
         self.blob_th = blob_th
 
@@ -217,10 +231,8 @@ class AsIsDataset(AnoTwinBaseDataset):
                          album_tfm=album_tfm, transform=transform,
                          target_transform=target_transform,
                          load_size=load_size, crop_size=crop_size,
-                         online_pre_crop_rect=online_pre_crop_rect, random_crop=False)
-
-    def __len__(self):
-        return len(self.df)
+                         online_pre_crop_rect=online_pre_crop_rect,
+                         random_crop=False, mixup_alpha=0.0)
 
     def __getitem__(self, idx):
         self.set_rand_seed(idx)

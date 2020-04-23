@@ -4,7 +4,7 @@ from PIL import Image
 import imagehash
 import numpy as np
 from base_ano_det import BaseAnoDet
-from utils import maybe_this_or_none
+from utils import maybe_this
 
 
 class ImgHashAnoDet(BaseAnoDet):
@@ -20,7 +20,7 @@ class ImgHashAnoDet(BaseAnoDet):
 
     def open_image(self, filename):
         img = Image.open(filename)
-        online_pre_crop_rect = maybe_this_or_none(self.params.data, 'online_pre_crop_rect')
+        online_pre_crop_rect = maybe_this(self.params.data, 'online_pre_crop_rect', None)
         return img if online_pre_crop_rect is None else img.crop(online_pre_crop_rect)
 
     def build_good_hash(self, good_samples, cache=True):

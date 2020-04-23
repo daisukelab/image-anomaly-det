@@ -18,7 +18,7 @@ from arcface_pytorch.models import ArcMarginProduct
 
 from utils import (get_embeddings, get_body_model,
                    visualize_cnn_grad_cam, visualize_embeddings,
-                   maybe_this_or_none,
+                   maybe_this,
                    to_raw_image, set_model_param_trainable)
 from anotwin.train import train_model
 from anotwin.dataset import AnomalyTwinDataset, DefectOnBlobDataset, AsIsDataset
@@ -145,17 +145,32 @@ class AnoTwinDet(BaseAnoDet):
         if len(file_lists["val"]) == 0:
             self.logger.debug('No val files, check train_set')
 
-        self.ds = {x: self.dataset_cls(file_lists[x],
-                                       load_size=self.load_size, crop_size=self.crop_size,
-                                       album_tfm=self.train_album_tfm if x == 'train' else None,
-                                       transform=self.train_tfm if x == 'train' else None,
-                                       width_min=self.params.data.width_min,
-                                       width_max=self.params.data.width_max,
-                                       length_max=self.params.data.length_max,
-                                       color=self.params.data.color,
-                                       online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'),
+        self.ds = {}
+        self.ds['train'] = self.dataset_cls(file_lists['train'],
+                                            load_size=self.load_size, crop_size=self.crop_size,
+                                            album_tfm=self.train_album_tfm,
+                                            transform=self.train_tfm,
+                                            width_min=self.params.data.width_min,
+                                            width_max=self.params.data.width_max,
+                                            length_max=self.params.data.length_max,
+                                            color=self.params.data.color,
+                                            online_pre_crop_rect=maybe_this(self.params.data, 'online_pre_crop_rect', None),
+                                            random_crop=True,
+                                            mixup_alpha=maybe_this(self.params, 'mixup_alpha', 0.0)
                                       )
-                   for x in ['train', 'val']}
+        self.ds['val'] = self.dataset_cls(file_lists['val'],
+                                          load_size=self.load_size, crop_size=self.crop_size,
+                                          album_tfm=None,
+                                          transform=None,
+                                          width_min=self.params.data.width_min,
+                                          width_max=self.params.data.width_max,
+                                          length_max=self.params.data.length_max,
+                                          color=self.params.data.color,
+                                          online_pre_crop_rect=maybe_this(self.params.data, 'online_pre_crop_rect', None),
+                                          random_crop=maybe_this(self.params.data, 'val_random_crop', False),
+                                          mixup_alpha=0.0
+                                      )
+
         self.dl = {x: data.DataLoader(self.ds[x], batch_size=self.batch_size,
                                       shuffle=True, num_workers=self.workers,
                                       worker_init_fn=dataloader_worker_init_fn)
@@ -166,7 +181,7 @@ class AnoTwinDet(BaseAnoDet):
                                          class_labels=['good'] * len(train_samples),
                                          load_size=self.load_size, crop_size=self.crop_size,
                                          album_tfm=None, transform=None,
-                                         online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'))
+                                         online_pre_crop_rect=maybe_this(self.params.data, 'online_pre_crop_rect', None))
         self.dl['ref'] = data.DataLoader(self.ds['ref'], batch_size=self.batch_size,
                                          shuffle=False, num_workers=self.workers)
 
@@ -175,7 +190,7 @@ class AnoTwinDet(BaseAnoDet):
                                           class_labels=test_labels,
                                           load_size=self.load_size, crop_size=self.crop_size,
                                           album_tfm=None, transform=None,
-                                          online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'))
+                                          online_pre_crop_rect=maybe_this(self.params.data, 'online_pre_crop_rect', None))
         self.dl['test'] = data.DataLoader(self.ds['test'], batch_size=self.batch_size,
                                           shuffle=False, num_workers=self.workers)
 
@@ -230,7 +245,8 @@ class AnoTwinDet(BaseAnoDet):
         criterion = nn.CrossEntropyLoss()
         optimizer = self.optimizer(kind='sgd', lr=self.params.lr, weight_decay=0.9)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, total_steps=10, max_lr=self.params.lr)
-        result = train_model(self, criterion, optimizer, scheduler, self.dl, num_epochs=10, device=self.device)
+        result = train_model(self, criterion, optimizer, scheduler, self.dl, num_epochs=10,
+            flooding_b=maybe_this(self.params, 'flooding_b', 0.0), device=self.device)
 
         set_model_param_trainable(self.model, True)
         criterion = nn.CrossEntropyLoss()
@@ -244,8 +260,8 @@ class AnoTwinDet(BaseAnoDet):
                             max_lr=self.params.lr, final_div_factor=100)
         else:
             raise Exception('unknown scheduler')
-        result = train_model(self, criterion, optimizer, scheduler, self.dl,
-                                   num_epochs=self.params.n_epochs, device=self.device)
+        result = train_model(self, criterion, optimizer, scheduler, self.dl, num_epochs=self.params.n_epochs,
+            flooding_b=maybe_this(self.params, 'flooding_b', 0.0), device=self.device)
 
         if save:
             self.save_model(f'weights_{self.test_target}', weights=result['best_weights'])

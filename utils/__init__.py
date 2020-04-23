@@ -72,8 +72,8 @@ def visualize_cnn_grad_cam(model, image, title, target_class=1, target_layer=7, 
     show_heatmap(image, cam, title, ax=ax, show_original=show_original)
 
 
-def maybe_this_or_none(params, key):
-    return params[key] if key in params else None
+def maybe_this(params, key, default):
+    return params[key] if key in params else default
 
 
 # --> will be moved to dl-cliche

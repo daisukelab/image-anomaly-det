@@ -1,8 +1,15 @@
 from dlcliche.utils import *
+#from dlcliche.torch_utls import IntraBatchMixup
+from torch_utils_test import IntraBatchMixup
 import torch
 from torch import nn
 import time
 import copy
+
+
+def torch_flooding(loss, b):
+    """Flooding function."""
+    return (loss - b).abs() + b
 
 
 def _get_model_wts(det):
@@ -16,8 +23,10 @@ def _set_model_wts(det, wts):
 
 
 def train_model(det, criterion, optimizer, scheduler,
-                dataloaders, num_epochs, device):
+                dataloaders, num_epochs, flooding_b, device):
     since = time.time()
+
+    mixup_alpha = 0.0
 
     best_model_wts = _get_model_wts(det)
     best_acc = 0.0
@@ -25,6 +34,8 @@ def train_model(det, criterion, optimizer, scheduler,
     
     dataset_sizes = {phase: len(dataloaders[phase].dataset)
                      for phase in ['train', 'val']}
+
+    batch_tfm = IntraBatchMixup(criterion, alpha=mixup_alpha) if mixup_alpha > 0.0 else None
 
     for epoch in range(num_epochs):
         prm_grps = optimizer.param_groups[0]
@@ -48,8 +59,9 @@ def train_model(det, criterion, optimizer, scheduler,
 
             # Iterate over data.
             for inputs, labels in dataloaders[phase]:
-                inputs = inputs.to(device)
-                labels = labels.to(device)
+                inputs, labels = inputs.to(device), labels.to(device)
+                if batch_tfm:
+                    inputs, labels = batch_tfm.transform(inputs, labels, train=(phase == 'train'))
 
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -57,9 +69,18 @@ def train_model(det, criterion, optimizer, scheduler,
                 # forwaself.weightsdetrd
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
-                    outputs = det.clf_forward(inputs, labels)
+                    if batch_tfm:
+                        outputs = det.clf_forward(inputs, labels[0])
+                        outputs2 = det.clf_forward(inputs, labels[1])
+                        loss = batch_tfm.criterion(outputs, labels, outputs2=outputs2)
+                    else:
+                        outputs = det.clf_forward(inputs, labels)
+                        loss = criterion(outputs, labels)
                     _, preds = torch.max(outputs, 1)
-                    loss = criterion(outputs, labels)
+
+                    # flooding
+                    if flooding_b > 0.0 and phase == 'train':
+                        loss = torch_flooding(loss, flooding_b)
 
                     # backward + optimize only if in training phase
                     if phase == 'train':
@@ -68,7 +89,7 @@ def train_model(det, criterion, optimizer, scheduler,
 
                 # statistics
                 running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels.data)
+                running_corrects += torch.sum(preds == (labels[0] if batch_tfm else labels).data)
 
             if phase == 'train':
                 scheduler.step()

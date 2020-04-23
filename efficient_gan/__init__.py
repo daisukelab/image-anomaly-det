@@ -21,7 +21,7 @@ from dlcliche.math import n_by_m_distances, np_describe
 from sklearn import metrics
 from PIL import Image
 import time
-from utils import maybe_this_or_none, to_raw_image, pil_crop
+from utils import maybe_this, to_raw_image, pil_crop
 from base_ano_det import BaseAnoDet
 
 
@@ -68,7 +68,7 @@ class EfficientGANAnoDet(BaseAnoDet):
                 crop_size=self.params.crop_size,
                 transform=self._transform(),
                 random=(phase == 'train'),
-                online_pre_crop_rect=maybe_this_or_none(self.params.data, 'online_pre_crop_rect'),
+                online_pre_crop_rect=maybe_this(self.params.data, 'online_pre_crop_rect', None),
                 mode='RGB' if self.params.data.color else 'L')
             self.dl[phase] = torch.utils.data.DataLoader(self.ds[phase],
                 batch_size=self.params.batch_size, shuffle=(phase == 'train'))
