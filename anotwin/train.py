@@ -1,6 +1,5 @@
 from dlcliche.utils import *
-#from dlcliche.torch_utls import IntraBatchMixup
-from torch_utils_test import IntraBatchMixup
+from dlcliche.torch_utils import IntraBatchMixup
 import torch
 from torch import nn
 import time
