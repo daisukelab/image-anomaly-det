@@ -92,7 +92,15 @@ class AnoTwinDet(BaseAnoDet):
             return _backbone_models[self.backbone]
         return self.backbone # expect this option to be a model object
 
+    def set_random_seed(self):
+        base_seed = self.params.seed if 'seed' in self.params else 0
+        if self.experiment_no is not None:
+            base_seed += self.experiment_no
+        deterministic_everything(base_seed, pytorch=True)
+        return base_seed
+
     def create_model(self, model_weights=None, **kwargs):
+        self.set_random_seed()
         base_model = self.get_backbone()(pretrained=True)
         self.model = (get_body_model(base_model)
                       .to(self.device))
@@ -104,11 +112,8 @@ class AnoTwinDet(BaseAnoDet):
             self.logger.info(f' using model weight: {model_weights}')
 
     def setup_train(self, train_samples, train_set=None):
-        # set random seed
-        base_seed = self.params.seed if 'seed' in self.params else 0
-        base_seed += self.experiment_no
+        base_seed = self.set_random_seed()
         self.logger.info(f'Random seed: {base_seed}')
-        deterministic_everything(base_seed, pytorch=True)
 
         # prepare datasets
         self.create_datasets(train_samples, train_set=train_set)
