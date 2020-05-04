@@ -1,28 +1,7 @@
 from dlcliche.utils import *
 sys.path.append('..')
 from base_ano_det import BaseAnoDet
-from utils import preprocess_images
-
-
-def preprocess_project_images(params, det, raw_train_files,
-                              raw_test_files, skip_preprocess) -> (list, list):
-    if not skip_preprocess:
-        ensure_delete(det.work_folder/'train')
-        ensure_delete(det.work_folder/'test')
-    train_files = preprocess_images(raw_train_files, to_folder=det.work_folder/'train',
-        size=params.load_size if 'load_size' in params else None,
-        mode=None if 'color' not in params.data else 'RGB' if params.data.color else 'L',
-        suffix=params.suffix,
-        pre_crop_rect=params.data.pre_crop_rect,
-        skip_creation=skip_preprocess,
-        verbose=params.verbose if 'verbose' in params else False)
-    test_files = preprocess_images(raw_test_files, to_folder=det.work_folder/'test',
-        size=params.load_size if 'load_size' in params else None,
-        mode=None if 'color' not in params.data else 'RGB' if params.data.color else 'L',
-        suffix=params.suffix, pre_crop_rect=params.data.pre_crop_rect,
-        skip_creation=skip_preprocess,
-        verbose=params.verbose if 'verbose' in params else False)
-    return train_files, test_files
+from utils import preprocess_det_images
 
 
 def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
@@ -59,8 +38,10 @@ def evaluate_MVTecAD(data_root, ano_det_cls: BaseAnoDet, params, iteration=1,
 
         # preprocess data
         print((' preprocessing...'))
-        train_files, test_files = preprocess_project_images(params, det,
-            raw_train_files, raw_test_files, skip_preprocess)
+        train_files = preprocess_det_images(params, det, raw_train_files,
+            'train', skip_preprocess)
+        test_files = preprocess_det_images(params, det, raw_test_files,
+            'test', skip_preprocess)
 
         for exp in range(iteration):
             # prepare

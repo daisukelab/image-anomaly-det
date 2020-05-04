@@ -1,11 +1,16 @@
+import numpy as np
+import sys
+import random
+import re
+from pathlib import Path
+from PIL import Image
+import matplotlib.pyplot as plt
 import torch
 from torch import nn
-import numpy as np
-from dlcliche.image import show_2D_tSNE
-import sys
 from pytorch_cnn_visualizations.src.gradcam import GradCam
-import matplotlib.pyplot as plt
-import random
+from dlcliche.utils import ensure_folder, ensure_delete, is_array_like
+from dlcliche.torch_utils import to_raw_image
+from dlcliche.image import (show_2D_tSNE, pil_crop, pil_translate_fill_mirror, plt_tiled_imshow, preprocess_images)
 
 
 def get_body_model(model):
@@ -76,13 +81,14 @@ def maybe_this(params, key, default):
     return params[key] if key in params else default
 
 
-# --> will be moved to dl-cliche
-import re
-from pathlib import Path
-from dlcliche.utils import ensure_folder, is_array_like
-from PIL import Image
-
-from dlcliche.torch_utils import to_raw_image
-from dlcliche.image import (pil_crop, pil_translate_fill_mirror, plt_tiled_imshow, preprocess_images)
-
-
+def preprocess_det_images(params, det, raw_files, to_folder, skip_preprocess) -> list:
+    if not skip_preprocess:
+        ensure_delete(det.work_folder/to_folder)
+    new_name_files = preprocess_images(raw_files, to_folder=det.work_folder/to_folder,
+        size=params.load_size if 'load_size' in params else None,
+        mode=None if 'color' not in params.data else 'RGB' if params.data.color else 'L',
+        suffix=params.suffix,
+        pre_crop_rect=params.data.pre_crop_rect,
+        skip_creation=skip_preprocess,
+        verbose=params.verbose if 'verbose' in params else False)
+    return new_name_files

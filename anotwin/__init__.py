@@ -205,10 +205,10 @@ class AnoTwinDet(BaseAnoDet):
         most_train_info = ref_ds.df.iloc[most_train_idxs]
         most_test_info  = test_ds.df.iloc[most_test_idxs]
         #print(distances.shape, most_train_idxs, most_test_idxs)
-        most_test_info['distance'] = [distances[_test, _trn]
-                                       for _trn, _test in zip(most_train_idxs, most_test_idxs)]
-        most_test_info['train_idx'] = most_train_info.index
-        most_test_info['train_x'] = most_train_info.file.values
+        most_test_info.loc[:, 'distance'] = [distances[_test, _trn]
+            for _trn, _test in zip(most_train_idxs, most_test_idxs)]
+        most_test_info.loc[:, 'train_idx'] = most_train_info.index
+        most_test_info.loc[:, 'train_x'] = most_train_info.file.values
         return most_test_info
 
     def _model_fn(self, save_name, kind):
