@@ -50,17 +50,24 @@ def visualize_embeddings(title, embeddings, ys, classes):
     return show_2D_tSNE(many_dim_vector=embeddings, target=[int(y) for y in ys], title=title, labels=classes)
 
 
-def show_heatmap(img, hm, label, alpha=0.5, ax=None, show_original=None):
+def show_heatmap(img, hm, label, alpha=0.5, ax=None, show_original=None, scale=True):
     """Based on fast.ai implementation..."""
     if ax is None: _, ax = plt.subplots(1, 1)
     ax.set_title(label)
     _im = to_raw_image(img[0]) if isinstance(img[0], torch.Tensor) else img[0]
     if hm.shape[:2] != _im.shape[:2]:
-        hm = Image.fromarray(hm).resize(_im.shape[1], _im.shape[0])
+        hm = Image.fromarray(hm).resize((_im.shape[1], _im.shape[0]))
+        hm = np.array(hm)
     _cm = plt.cm.magma(plt.Normalize()(hm))[:, :, :3]
     img = (1 - alpha) * _im + alpha * _cm
     if show_original is not None:
         img = np.concatenate([_im, img], axis=0 if show_original == 'vertical' else 1)
+    if scale:
+        _min = img.min()
+        _vol = img.max() - _min
+        img = (img - _min) / (_vol + np.finfo(float).eps)
+    else:
+        img = img.clip(0.0, 1.0)
     ax.imshow(img)
     ax.get_xaxis().set_visible(False)
     ax.get_yaxis().set_visible(False)
